@@ -1,0 +1,24 @@
+{
+  "name": "@pi-patches/review-app",
+  "version": "0.0.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/cli.ts",
+    "./app": "./src/app.ts",
+    "./runner": "./src/runner.ts",
+    "./sources": "./src/sources/index.ts",
+    "./analysis": "./src/analysis/index.ts"
+  },
+  "bin": {
+    "pi-review": "./src/cli.ts"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "0.80.2",
+    "@earendil-works/pi-tui": "0.80.2",
+    "@pi-patches/store": "*",
+    "diff": "^8.0.0"
+  },
+  "devDependencies": {
+    "@xterm/headless": "5.5.0"
+  }
+}

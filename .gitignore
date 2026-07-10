@@ -1,0 +1,6 @@
+.devenv/
+.devenv.flake.nix
+devenv.lock
+node_modules/
+.tsbuildinfo/
+tmp/

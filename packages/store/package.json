@@ -1,0 +1,10 @@
+{
+  "name": "@pi-patches/store",
+  "version": "0.0.0",
+  "type": "module",
+  "exports": "./src/index.ts",
+  "scripts": {
+    "test": "node --test test/*.test.ts",
+    "typecheck": "tsc --build"
+  }
+}

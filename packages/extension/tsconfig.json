@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": true,
+    "tsBuildInfoFile": "../../.tsbuildinfo/extension.tsbuildinfo"
+  },
+  "references": [
+    {
+      "path": "../store"
+    }
+  ],
+  "include": [
+    "src/**/*.ts"
+  ]
+}
