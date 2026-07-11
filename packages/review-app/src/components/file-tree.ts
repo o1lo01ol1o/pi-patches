@@ -1,12 +1,20 @@
 import type { Annotation } from "@pi-patches/store";
 import { buildFileTreeRows } from "../render/file-tree-model.ts";
-import { changeTint, type ColorDepth, type TintTheme } from "../render/ansi.ts";
+import {
+  applyBackgroundToLine,
+  changeTint,
+  selectionTint,
+  truncateVisible,
+  type ColorDepth,
+  type TintTheme
+} from "../render/ansi.ts";
 import type { AppState, FileState } from "../state.ts";
 
 export type FileTreeTintOptions = {
   mode: AppState["tintMode"];
   colorDepth: ColorDepth;
   theme: TintTheme;
+  width?: number;
 };
 
 export function renderFileTree(
@@ -22,12 +30,19 @@ export function renderFileTree(
     if (row.kind === "directory") return `  ▸ ${row.dir}/`;
     const file = files[row.fileIndex];
     if (!file) return "";
-    const selectedMarker = row.fileIndex === selected ? ">" : " ";
+    const isSelected = row.fileIndex === selected;
+    const selectedMarker = isSelected ? ">" : " ";
     const annotationMarker = annotatedFileIds.has(file.row.id) ? "●" : " ";
     const missingMarker = file.current === null ? "∅" : " ";
-    const additions = tintCount(`+${file.additions}`, "add", file.additions, tintOptions);
-    const deletions = tintCount(`-${file.deletions}`, "del", file.deletions, tintOptions);
-    return `${selectedMarker} ${annotationMarker}${missingMarker} ${row.displayName} ${additions} ${deletions}`;
+    const additions = tintCount(`+${file.additions}`, "add", file.additions, isSelected ? undefined : tintOptions);
+    const deletions = tintCount(`-${file.deletions}`, "del", file.deletions, isSelected ? undefined : tintOptions);
+    const line = `${selectedMarker} ${annotationMarker}${missingMarker} ${row.displayName} ${additions} ${deletions}`;
+    if (!isSelected || tintOptions?.width === undefined) return line;
+    return applyBackgroundToLine(
+      truncateVisible(line, tintOptions.width),
+      tintOptions.width,
+      selectionTint(tintOptions.colorDepth, tintOptions.theme)
+    );
   });
 }
 

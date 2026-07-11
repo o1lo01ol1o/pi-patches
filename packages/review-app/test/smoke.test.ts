@@ -173,7 +173,8 @@ test("embedded review component renders and closes without owning the parent TUI
   try {
     const lines = component.render(80);
     assert.equal(lines.length, 22);
-    assert.match(lines.join("\n"), /no files · cumulative · syntax/);
+    assert.match(lines.join("\n"), /cumulative · syntax/);
+    assert.match(lines.join("\n"), /File: no selected file/);
     assert.deepEqual(terminal.writes, ["\x1b[?1002h\x1b[?1006h"]);
     component.handleInput?.("q");
     assert.equal(closes, 1);

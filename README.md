@@ -174,7 +174,8 @@ workflow is not registered.
 The first row contains stable Diff, Notes, Narrative, and Review tabs. The Diff
 tab has a file tree on the left and the selected diff on the right. The status
 bar reports draft, queued, and sent counts plus the current mode and transient
-messages.
+messages. A second sticky header row shows the selected file's absolute path; it
+does not move when either pane scrolls.
 
 ### Navigation
 
@@ -217,9 +218,10 @@ For per-commit Git sources, `n`/`p` browse the selected file's commit history an
 
 Syntax mode highlights source code and, for session cumulative diffs, attributes
 lines to patch recency. Tint mode cycles between a recency gradient, a uniform
-change background, and no background. The file browser applies the active tint
-mode independently to non-zero green `+N` and red `-N` counters, so a modified
-file can display both colors.
+change background, and no background. The selected file is highlighted across
+the full tree width. Other file rows apply the active tint mode independently to
+non-zero green `+N` and red `-N` counters, so a modified file can display both
+colors.
 
 Useful markers:
 

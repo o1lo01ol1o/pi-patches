@@ -352,7 +352,7 @@ test("file tree independently tints addition and deletion counts", () => {
   const file = { ...makeFile(), additions: 3, deletions: 2 };
   const tinted = renderFileTree(
     [file],
-    0,
+    1,
     [],
     0,
     1,
@@ -364,7 +364,7 @@ test("file tree independently tints addition and deletion counts", () => {
 
   const fallback = renderFileTree(
     [file],
-    0,
+    1,
     [],
     0,
     1,
@@ -375,13 +375,25 @@ test("file tree independently tints addition and deletion counts", () => {
 
   const untinted = renderFileTree(
     [file],
-    0,
+    1,
     [],
     0,
     1,
     { mode: "off", colorDepth: "truecolor", theme: "dark" }
   )[0] ?? "";
   assert.doesNotMatch(untinted, /\x1b\[48;/);
+
+  const selected = renderFileTree(
+    [file],
+    0,
+    [],
+    0,
+    1,
+    { mode: "uniform", colorDepth: "truecolor", theme: "dark", width: 24 }
+  )[0] ?? "";
+  assert.match(selected, /^\x1b\[48;2;58;58;74m/);
+  assert.doesNotMatch(selected, /48;2;20;82;20|48;2;103;22;31/);
+  assert.equal(visibleWidth(selected), 24);
 });
 
 test("per-commit dataset history renders commit identity and native per-file diffs", () => {
@@ -517,6 +529,21 @@ test("renderFrame always matches the requested terminal dimensions", () => {
       }
     }
   }
+});
+
+test("absolute file path header stays fixed while the selected tree row is highlighted", () => {
+  const file = makeFile(1, "nested/example.txt", "old\n", "new\n");
+  const state = fixtureState({
+    files: [file],
+    scrollTop: { tree: 0, diff: 1 }
+  });
+  const frame = renderFrame(state, 100, 8);
+  const selectedRow = frame.find((line) => /\x1b\[48;2;58;58;74m/.test(line)) ?? "";
+
+  assert.match(stripAnsi(frame[1] ?? ""), /^File: \/tmp\/nested\/example\.txt/);
+  assert.match(selectedRow, /\x1b\[48;2;58;58;74m/);
+  assert.match(stripAnsi(selectedRow), />    example\.txt \+1 -1/);
+  assert.equal(visibleWidth(selectedRow), 100);
 });
 
 test("dbChanged replaces DB-backed state while preserving UI choices", () => {
@@ -844,7 +871,8 @@ test("syntax diff falls back to uniform most-recent tint on patch chain breaks",
 
 test("syntax header shows the recency tint legend", () => {
   const tinted = stripAnsi(renderFrame(fixtureState(), 100, 8).join("\n"));
-  assert.match(tinted, /example\.txt · cumulative · syntax · tint:gradient old ░▒▓█ new/);
+  assert.match(tinted, /wrap · cumulative · syntax · tint:gradient old ░▒▓█ new/);
+  assert.match(tinted, /File: \/tmp\/example\.txt/);
 
   const untinted = stripAnsi(renderFrame(fixtureState({ tintMode: "off" }), 100, 8).join("\n"));
   assert.doesNotMatch(untinted, /old ░▒▓█ new/);

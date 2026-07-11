@@ -858,6 +858,12 @@ cancellation states are explicit modes in the reducer; only one analysis run may
 own a component at a time, while completed runs remain browseable by timestamp,
 model, source fingerprint, and mode.
 
+The selected file's absolute `FileRecord.path` occupies a dedicated sticky header
+row with the full terminal width available to it. It remains fixed while either
+pane scrolls. The corresponding file row uses the theme-aware selection
+background across the complete tree width, without changing its marker, click
+target, or row geometry.
+
 The same component owns mouse reporting for its lifetime. Header tabs, visible
 file rows, and visible diff lines are clickable; drag selection uses exact line
 coordinates; wheel events scroll the hovered split pane or active full-width
@@ -887,7 +893,9 @@ File rows render addition and deletion counts as separate change surfaces:
 non-zero `+N` uses the add background and non-zero `-N` uses the delete
 background from the active dark/light and truecolor/256-color tint palette. A
 file with both kinds shows both colors; tint-off mode removes both backgrounds
-without changing markers, hit regions, text width, or file ordering.
+without changing markers, hit regions, text width, or file ordering. The selected
+row's full-width selection background takes precedence over its count tints so
+the active file has one coherent highlight.
 
 ### 10.9 Explicit non-adoptions from upstream `pi-review`
 
@@ -933,7 +941,9 @@ visual-row wheel scrolling, and cached large-diff rendering.
 Session-history reducer tests cover cross-file previous/next navigation, boundary
 clamping, follow-tail refresh, and manual follow disengagement. File-tree tests
 cover simultaneous add/delete backgrounds, tint-off behavior, and ANSI-safe
-terminal widths.
+terminal widths. Frame tests keep the absolute path in the sticky header while
+the diff is scrolled and require the selected file highlight to fill the tree
+track without changing total frame width.
 
 **Phase 10 — live acceptance.** In a real isolated pi TTY: inspect a recorded
 session, working tree, branch range, and non-destructive PR source; create

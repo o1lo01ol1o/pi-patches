@@ -11,8 +11,8 @@ export function renderFrame(state: AppState, width: number, height: number): str
   const { rows, columns, bodyRows, bodyTop, treeWidth, diffWidth } = computeFrameLayout(width, height);
   const lines: string[] = [];
 
-  const selectedPath = state.files[state.selectedFile]?.row.relPath ?? "no files";
-  lines.push(pad(`${tabHeader(state)} · ${sourceLabel(state)}`, columns));
+  const selectedFile = state.files[state.selectedFile];
+  const selectedPath = selectedFile?.row.path ?? "no selected file";
   const showProvenance = state.dataset.source.kind === "session";
   const tintLegend = showProvenance && state.view === "cumulative" && state.renderMode === "syntax" && state.tintMode !== "off" ? " old ░▒▓█ new" : "";
   const visibleRenderMode = state.view === "history" ? "native" : state.renderMode;
@@ -21,7 +21,8 @@ export function renderFrame(state: AppState, width: number, height: number): str
   const patchNavigation = patchPosition === null
     ? ""
     : ` · patch ${patchPosition.index + 1}/${patchPosition.total}${patchPosition.following ? " · following" : ""}`;
-  if (rows >= 3) lines.push(pad(`${selectedPath} · ${state.view} · ${visibleRenderMode}${patchNavigation}${tint} · ${state.wrapLines ? "wrap" : "nowrap"}`, columns));
+  lines.push(pad(`${tabHeader(state)} · ${state.wrapLines ? "wrap" : "nowrap"} · ${state.view} · ${visibleRenderMode}${patchNavigation}${tint} · ${sourceLabel(state)}`, columns));
+  if (rows >= 3) lines.push(pad(`File: ${selectedPath}`, columns));
 
   if (state.activeTab === "diff") {
     const treeLines = renderFileTree(
@@ -30,7 +31,7 @@ export function renderFrame(state: AppState, width: number, height: number): str
       state.annotations,
       state.scrollTop.tree,
       bodyRows,
-      { mode: state.tintMode, colorDepth: state.colorDepth, theme: state.tintTheme }
+      { mode: state.tintMode, colorDepth: state.colorDepth, theme: state.tintTheme, width: treeWidth }
     );
     const file = state.files[state.selectedFile];
     const fileAnnotations = file ? state.annotations.filter((annotation) => annotation.fileId === file.row.id) : [];
