@@ -139,6 +139,8 @@ c               comment
 a               annotation list
 S               submit fresh agent findings
 H               cumulative/history view
+n/p             previous/next session patch across files
+f               follow the latest session patch
 d               syntax/native diff rendering
 w               toggle line wrapping
 t               tint mode
@@ -151,5 +153,7 @@ q               quit
 Mouse support is enabled for the component lifetime and restored on exit. In Ghostty, wheel scrolling follows the hovered file/diff/result pane, header tabs and visible files are clickable, diff-line clicks use the current scroll offset, and left-button drag creates an exact line selection.
 
 Diff and note text wraps by default at word boundaries, with hard wrapping for long tokens. ANSI syntax colors and wide characters are preserved. Continuation rows use `↳`; clicking or dragging one still targets its original source line, and wheel scrolling can move through every continuation. Press `w` to temporarily use clipped lines instead.
+
+Session history navigation is chronological across the whole patch stream rather than confined to one file. Press `n` or `p` to move forward or backward; the selected file follows the patch. Press `f` to jump to the newest patch and keep following new patches as the connected session records them. Any manual patch or file movement leaves follow mode. The file browser uses the active tint mode to give `+N` and `-N` counters independent green and red backgrounds.
 
 On `q`, drafts open a four-way finish selector: return without submitting, submit feedback, submit and ask pi to fix, or cancel. Human findings and callouts remain separate; stale agent findings are never queued.

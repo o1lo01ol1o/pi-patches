@@ -51,6 +51,15 @@ export type DatasetHistoryEntry = {
 
 const cumulativeDiffModelCache = new WeakMap<FileState, DiffModel>();
 
+type PatchTimeline = {
+  ordered: PatchRecord[];
+  byFile: Map<FileId, PatchRecord[]>;
+  globalIndexById: Map<PatchId, number>;
+  localIndexById: Map<PatchId, number>;
+};
+
+const patchTimelineCache = new WeakMap<readonly PatchRecord[], PatchTimeline>();
+
 export type DbSnapshot = {
   files: FileState[];
   patches: PatchRecord[];
@@ -107,6 +116,7 @@ export type AppState = {
   colorDepth: ColorDepth;
   tintTheme: TintTheme;
   patchIdx: number;
+  followLatestPatch: boolean;
   cursorRow: DiffRow;
   annotationCursor: number;
   scrollTop: { tree: number; diff: number };
@@ -117,7 +127,7 @@ export type AppState = {
 };
 
 export type AppKey =
-  | "q" | "r" | "tab" | "h" | "l" | "Enter" | "H" | "d" | "t" | "n" | "p"
+  | "q" | "r" | "tab" | "h" | "l" | "Enter" | "H" | "d" | "t" | "n" | "p" | "f"
   | "g" | "G" | "ctrl+e" | "ctrl+y" | "{" | "}" | "?" | "a" | "S" | "c" | "v"
   | "j" | "ArrowDown" | "k" | "ArrowUp" | "ctrl+d" | "ctrl+u" | "]" | "[" | "Escape"
   | "y" | "e" | "x" | "u" | "I" | "ctrl+s" | "Backspace" | "1" | "2" | "3" | "4" | "w";
@@ -253,6 +263,7 @@ export function update(state: AppState, event: AppEvent): { state: AppState; eff
           pendingKey: null,
           view: state.view === "cumulative" ? "history" : "cumulative",
           patchIdx: 0,
+          followLatestPatch: false,
           cursorRow: diffRow(0),
           scrollTop: { ...state.scrollTop, diff: 0 }
         },
@@ -277,6 +288,8 @@ export function update(state: AppState, event: AppEvent): { state: AppState; eff
       return selectPatch(state, 1);
     case "p":
       return selectPatch(state, -1);
+    case "f":
+      return followLatestPatch(state);
     case "g":
       return { state: { ...state, pendingKey: "g", statusMessage: "g" }, effects: [] };
     case "G":
@@ -357,16 +370,22 @@ export function update(state: AppState, event: AppEvent): { state: AppState; eff
 }
 
 function applyDbSnapshot(state: AppState, snapshot: DbSnapshot): { state: AppState; effects: Effect[] } {
+  const previousTail = patchTimeline(state.patches).ordered.at(-1)?.id;
+  const nextTail = patchTimeline(snapshot.patches).ordered.at(-1)?.id;
+  const replaced = {
+    ...state,
+    files: snapshot.files,
+    patches: snapshot.patches,
+    annotations: snapshot.annotations,
+    selectedFile: Math.min(state.selectedFile, Math.max(0, snapshot.files.length - 1)),
+    annotationCursor: Math.min(state.annotationCursor, Math.max(0, snapshot.annotations.length - 1)),
+    mode: state.mode.kind === "comment" ? { kind: "normal" } as const : state.mode
+  };
+  const followed = state.followLatestPatch && previousTail !== nextTail
+    ? selectLatestSessionPatch(replaced, true)
+    : replaced;
   return {
-    state: clampScroll({
-      ...state,
-      files: snapshot.files,
-      patches: snapshot.patches,
-      annotations: snapshot.annotations,
-      selectedFile: Math.min(state.selectedFile, Math.max(0, snapshot.files.length - 1)),
-      annotationCursor: Math.min(state.annotationCursor, Math.max(0, snapshot.annotations.length - 1)),
-      mode: state.mode.kind === "comment" ? { kind: "normal" } : state.mode
-    }),
+    state: clampScroll(followed),
     effects: []
   };
 }
@@ -826,6 +845,7 @@ function selectFileAt(state: AppState, index: number, viewportRows: number): { s
       selectedFile: next,
       focusedPane: "tree",
       patchIdx: 0,
+      followLatestPatch: false,
       cursorRow: diffRow(0),
       selection: null,
       scrollTop: { ...state.scrollTop, diff: 0, tree: scrollTopFor(treeRow, state.scrollTop.tree, viewportRows) }
@@ -838,17 +858,105 @@ function selectPatch(state: AppState, delta: number): { state: AppState; effects
   if (state.view !== "history") return { state, effects: [] };
   const file = state.files[state.selectedFile];
   if (!file) return { state, effects: [] };
+  if (state.dataset.source.kind === "session" && state.historyEntries.length === 0) {
+    const timeline = patchTimeline(state.patches);
+    if (timeline.ordered.length === 0) return { state, effects: [] };
+    const position = sessionPatchPosition(state);
+    const current = position?.index ?? (delta > 0 ? -1 : timeline.ordered.length);
+    const target = clamp(current + delta, 0, timeline.ordered.length - 1);
+    return { state: selectSessionPatchAt(state, target, false), effects: [] };
+  }
   const count = historyCountForFile(state, file.row.id);
   if (count === 0) return { state, effects: [] };
   return {
     state: {
       ...state,
       patchIdx: clamp(state.patchIdx + delta, 0, count - 1),
+      followLatestPatch: false,
       cursorRow: diffRow(0),
       scrollTop: { ...state.scrollTop, diff: 0 }
     },
     effects: []
   };
+}
+
+function followLatestPatch(state: AppState): { state: AppState; effects: Effect[] } {
+  if (state.dataset.source.kind !== "session" || state.historyEntries.length > 0) {
+    return { state: { ...state, statusMessage: "Follow latest is available for session patches" }, effects: [] };
+  }
+  return { state: selectLatestSessionPatch({ ...state, view: "history" }, true), effects: [] };
+}
+
+function selectLatestSessionPatch(state: AppState, following: boolean): AppState {
+  const timeline = patchTimeline(state.patches);
+  if (timeline.ordered.length === 0) {
+    return {
+      ...state,
+      view: "history",
+      followLatestPatch: following,
+      statusMessage: following ? "Following latest patch; waiting for the first patch" : state.statusMessage
+    };
+  }
+  return selectSessionPatchAt(state, timeline.ordered.length - 1, following);
+}
+
+function selectSessionPatchAt(state: AppState, index: number, following: boolean): AppState {
+  const timeline = patchTimeline(state.patches);
+  const targetIndex = clamp(index, 0, Math.max(0, timeline.ordered.length - 1));
+  const patch = timeline.ordered[targetIndex];
+  if (!patch) return { ...state, followLatestPatch: following };
+  const selectedFile = state.files.findIndex((file) => file.row.id === patch.fileId);
+  if (selectedFile < 0) {
+    return { ...state, followLatestPatch: false, statusMessage: `Patch ${patch.seq} file is no longer tracked` };
+  }
+  const treeRow = treeRowForFileIndex(state.files, selectedFile) ?? selectedFile;
+  return {
+    ...state,
+    selectedFile,
+    focusedPane: "diff",
+    view: "history",
+    patchIdx: timeline.localIndexById.get(patch.id) ?? 0,
+    followLatestPatch: following,
+    cursorRow: diffRow(0),
+    selection: null,
+    scrollTop: {
+      tree: scrollTopFor(treeRow, state.scrollTop.tree, viewportRows(state)),
+      diff: 0
+    },
+    statusMessage: `${following ? "Following" : "Patch"} ${targetIndex + 1}/${timeline.ordered.length}`
+  };
+}
+
+export function sessionPatchPosition(
+  state: AppState
+): { index: number; total: number; following: boolean } | null {
+  if (state.view !== "history" || state.dataset.source.kind !== "session" || state.historyEntries.length > 0) return null;
+  const file = state.files[state.selectedFile];
+  if (!file) return null;
+  const timeline = patchTimeline(state.patches);
+  const patch = timeline.byFile.get(file.row.id)?.[state.patchIdx];
+  if (!patch) return null;
+  const index = timeline.globalIndexById.get(patch.id);
+  return index === undefined ? null : { index, total: timeline.ordered.length, following: state.followLatestPatch };
+}
+
+function patchTimeline(patches: readonly PatchRecord[]): PatchTimeline {
+  const cached = patchTimelineCache.get(patches);
+  if (cached) return cached;
+  const ordered = [...patches].sort((left, right) => Number(left.seq) - Number(right.seq) || Number(left.id) - Number(right.id));
+  const byFile = new Map<FileId, PatchRecord[]>();
+  const globalIndexById = new Map<PatchId, number>();
+  const localIndexById = new Map<PatchId, number>();
+  ordered.forEach((patch, globalIndex) => {
+    const filePatches = byFile.get(patch.fileId) ?? [];
+    localIndexById.set(patch.id, filePatches.length);
+    filePatches.push(patch);
+    byFile.set(patch.fileId, filePatches);
+    globalIndexById.set(patch.id, globalIndex);
+  });
+  const timeline = { ordered, byFile, globalIndexById, localIndexById };
+  patchTimelineCache.set(patches, timeline);
+  return timeline;
 }
 
 export function draftForCursor(state: AppState): AnnotationDraft | null {

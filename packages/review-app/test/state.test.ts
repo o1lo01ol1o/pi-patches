@@ -21,6 +21,7 @@ import {
   type SessionId
 } from "@pi-patches/store";
 import { renderFrame } from "../src/components/frame.ts";
+import { renderFileTree } from "../src/components/file-tree.ts";
 import { computeFrameLayout } from "../src/layout.ts";
 import { buildDiffModel } from "../src/render/diff-model.ts";
 import { visualRowRef } from "../src/render/diff-wrap.ts";
@@ -253,6 +254,134 @@ test("history mode navigates selected file patches and renders the current patch
   const frame = stripAnsi(renderFrame(next.state, 80, 8).join("\n"));
   assert.match(frame, /patch 2\/2 · edit · 14:02:31/);
   assert.match(frame, /\+2 three/);
+});
+
+test("session patch navigation crosses file boundaries in chronological order", () => {
+  const files = [
+    makeFile(1, "first.txt", "zero\n", "one\n"),
+    makeFile(2, "second.txt", "alpha\n", "beta\n")
+  ];
+  const patches = [
+    makePatch({ id: 1, fileId: 1, seq: 1, displayDiff: "-1 zero\n+1 one" }),
+    makePatch({ id: 2, fileId: 2, seq: 2, displayDiff: "-1 alpha\n+1 beta" }),
+    makePatch({ id: 3, fileId: 1, seq: 3, displayDiff: "-1 one\n+1 final" })
+  ];
+  let state = fixtureState({ files, patches, view: "history", selectedFile: 0, patchIdx: 0 });
+
+  state = update(state, { kind: "key", key: "n" }).state;
+  assert.equal(state.selectedFile, 1);
+  assert.equal(state.patchIdx, 0);
+  assert.equal(state.followLatestPatch, false);
+
+  state = update(state, { kind: "key", key: "n" }).state;
+  assert.equal(state.selectedFile, 0);
+  assert.equal(state.patchIdx, 1);
+  assert.match(stripAnsi(renderFrame(state, 100, 8).join("\n")), /patch 3\/3/);
+
+  const boundary = update(state, { kind: "key", key: "n" }).state;
+  assert.equal(boundary.selectedFile, 0);
+  assert.equal(boundary.patchIdx, 1);
+
+  state = update(state, { kind: "key", key: "p" }).state;
+  assert.equal(state.selectedFile, 1);
+  assert.equal(state.patchIdx, 0);
+});
+
+test("follow latest advances on refresh and manual navigation disengages it", () => {
+  const files = [
+    makeFile(1, "first.txt", "zero\n", "one\n"),
+    makeFile(2, "second.txt", "alpha\n", "beta\n")
+  ];
+  const patches = [
+    makePatch({ id: 1, fileId: 1, seq: 1 }),
+    makePatch({ id: 2, fileId: 2, seq: 2 })
+  ];
+  let state = fixtureState({ files, patches });
+
+  state = update(state, { kind: "key", key: "f" }).state;
+  assert.equal(state.view, "history");
+  assert.equal(state.selectedFile, 1);
+  assert.equal(state.followLatestPatch, true);
+  assert.match(stripAnsi(renderFrame(state, 100, 8).join("\n")), /patch 2\/2 · following/);
+
+  const refreshed = update(state, {
+    kind: "dbChanged",
+    snapshot: {
+      files,
+      patches: [
+        ...patches,
+        makePatch({
+          id: 3,
+          fileId: 1,
+          seq: 3,
+          displayDiff: Array.from({ length: 30 }, (_, index) => `+${index + 1} line ${index + 1}`).join("\n")
+        })
+      ],
+      annotations: []
+    }
+  }).state;
+  assert.equal(refreshed.selectedFile, 0);
+  assert.equal(refreshed.patchIdx, 1);
+  assert.equal(refreshed.followLatestPatch, true);
+  assert.match(stripAnsi(renderFrame(refreshed, 100, 8).join("\n")), /patch 3\/3 · following/);
+
+  const compact = update(refreshed, { kind: "resize", cols: 80, rows: 4 }).state;
+  const positioned = { ...compact, cursorRow: 1 as DiffRow, scrollTop: { ...compact.scrollTop, diff: 1 } };
+  const annotationRefresh = update(positioned, {
+    kind: "dbChanged",
+    snapshot: {
+      files,
+      patches: refreshed.patches,
+      annotations: [makeAnnotation()]
+    }
+  }).state;
+  assert.equal(Number(annotationRefresh.cursorRow), 1);
+  assert.equal(annotationRefresh.scrollTop.diff, 1);
+  assert.equal(annotationRefresh.followLatestPatch, true);
+
+  const previous = update(refreshed, { kind: "key", key: "p" }).state;
+  assert.equal(previous.selectedFile, 1);
+  assert.equal(previous.followLatestPatch, false);
+
+  const manualFile = update(refreshed, { kind: "key", key: "]" }).state;
+  assert.equal(manualFile.selectedFile, 1);
+  assert.equal(manualFile.followLatestPatch, false);
+});
+
+test("file tree independently tints addition and deletion counts", () => {
+  const file = { ...makeFile(), additions: 3, deletions: 2 };
+  const tinted = renderFileTree(
+    [file],
+    0,
+    [],
+    0,
+    1,
+    { mode: "uniform", colorDepth: "truecolor", theme: "dark" }
+  )[0] ?? "";
+  assert.match(tinted, /\x1b\[48;2;20;82;20m\+3\x1b\[49m/);
+  assert.match(tinted, /\x1b\[48;2;103;22;31m-2\x1b\[49m/);
+  assert.equal(visibleWidth(tinted), visibleWidth(stripAnsi(tinted)));
+
+  const fallback = renderFileTree(
+    [file],
+    0,
+    [],
+    0,
+    1,
+    { mode: "uniform", colorDepth: "ansi256", theme: "dark" }
+  )[0] ?? "";
+  assert.match(fallback, /\x1b\[48;5;22m\+3\x1b\[49m/);
+  assert.match(fallback, /\x1b\[48;5;52m-2\x1b\[49m/);
+
+  const untinted = renderFileTree(
+    [file],
+    0,
+    [],
+    0,
+    1,
+    { mode: "off", colorDepth: "truecolor", theme: "dark" }
+  )[0] ?? "";
+  assert.doesNotMatch(untinted, /\x1b\[48;/);
 });
 
 test("per-commit dataset history renders commit identity and native per-file diffs", () => {
@@ -813,8 +942,9 @@ test("help overlay documents navigation, annotations, rendering, and refresh key
   const frame = stripAnsi(renderFrame(state, 120, 12).join("\n"));
   assert.match(frame, /ctrl\+d\/ctrl\+u half-page/);
   assert.match(frame, /Annotations: j\/k select, Enter jump, e edit, u re-anchor, x delete/);
-  assert.match(frame, /H history\s+n\/p patch in history\s+d native\/syntax/);
-  assert.match(frame, /t tint\s+r refresh\s+I guidelines\s+\? help/);
+  assert.match(frame, /H history\s+n\/p previous\/next patch\s+f follow latest patch/);
+  assert.match(frame, /d native\/syntax\s+w wrap\s+t tint\s+r refresh/);
+  assert.match(frame, /I guidelines\s+\? help\s+q quit/);
 });
 
 test("diff pane marks stale annotation ranges with a warning marker", () => {
@@ -1397,6 +1527,7 @@ function fixtureState(overrides: Partial<AppState> = {}): AppState {
     colorDepth: "truecolor",
     tintTheme: "dark",
     patchIdx: 0,
+    followLatestPatch: false,
     cursorRow: 2 as DiffRow,
     annotationCursor: 0,
     scrollTop: { tree: 0, diff: 0 },
@@ -1521,12 +1652,12 @@ function makeFile(id = 1, relPath = "example.txt", baseline = "zero\ntwo\n", cur
   };
 }
 
-function makePatch(overrides: Partial<{ id: number; seq: number; displayDiff: string; unifiedPatch: string; preHash: ContentHash; postHash: ContentHash; createdAt: number }> = {}): PatchRecord {
+function makePatch(overrides: Partial<{ id: number; fileId: number; seq: number; displayDiff: string; unifiedPatch: string; preHash: ContentHash; postHash: ContentHash; createdAt: number }> = {}): PatchRecord {
   const sessionId = unwrap(checkedSessionId("state-test-session"));
   return {
     id: (overrides.id ?? 1) as PatchId,
     sessionId,
-    fileId: 1 as FileId,
+    fileId: (overrides.fileId ?? 1) as FileId,
     seq: (overrides.seq ?? 1) as Seq,
     tool: "edit",
     toolCallId: "call-1",

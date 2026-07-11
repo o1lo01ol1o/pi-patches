@@ -735,7 +735,7 @@ export function dataVersionAfterRefresh(previous: number, observed: Result<numbe
 }
 
 function knownSingleKey(data: string): data is AppKey {
-  return data.length === 1 && "qrhlHdtnpgG{}?aScevjkw[]ynuxI1234".includes(data);
+  return data.length === 1 && "qrhlHdtnpfgG{}?aScevjkw[]ynuxI1234".includes(data);
 }
 
 function assertNever(value: never): never {

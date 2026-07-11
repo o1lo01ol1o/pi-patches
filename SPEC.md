@@ -874,6 +874,21 @@ to logical diff/current-file coordinates, and wheel scrolling can traverse every
 continuation without skipping the remainder of a long line. Resize and wrap-mode
 changes preserve the logical row at the top of the viewport where possible.
 
+Session patch history is one chronological stream across all tracked files.
+`n` and `p` move to the next or previous patch in session sequence order and
+select that patch's file; navigation clamps at stream boundaries. `f` enters
+history at the newest patch and enables an explicit follow-latest state. While
+following, a database refresh that appends patches advances to the new tail.
+Manual patch or file navigation disables following. Git per-commit history keeps
+its source-local commit navigation and does not claim to follow live patches.
+The title exposes global patch position and whether follow mode is active.
+
+File rows render addition and deletion counts as separate change surfaces:
+non-zero `+N` uses the add background and non-zero `-N` uses the delete
+background from the active dark/light and truecolor/256-color tint palette. A
+file with both kinds shows both colors; tint-off mode removes both backgrounds
+without changing markers, hit regions, text width, or file ordering.
+
 ### 10.9 Explicit non-adoptions from upstream `pi-review`
 
 - no `/review` or `/end-review` commands;
@@ -915,6 +930,10 @@ and line clicks, blank-row clicks, drag/release selection, responsive resize, an
 enable/disable cleanup. Wrapping tests cover ANSI spans, wide graphemes, unbroken
 tokens, syntax and native/history views, wrap toggling, continuation hit-testing,
 visual-row wheel scrolling, and cached large-diff rendering.
+Session-history reducer tests cover cross-file previous/next navigation, boundary
+clamping, follow-tail refresh, and manual follow disengagement. File-tree tests
+cover simultaneous add/delete backgrounds, tint-off behavior, and ANSI-safe
+terminal widths.
 
 **Phase 10 — live acceptance.** In a real isolated pi TTY: inspect a recorded
 session, working tree, branch range, and non-destructive PR source; create

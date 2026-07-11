@@ -116,6 +116,7 @@ test("key parser maps known controls and drops unknown raw sequences", () => {
   assert.equal(keyFromInput("\t"), "tab");
   assert.equal(keyFromInput("\x05"), "ctrl+e");
   assert.equal(keyFromInput("j"), "j");
+  assert.equal(keyFromInput("f"), "f");
   assert.equal(keyFromInput("w"), "w");
   assert.equal(keyFromInput("\x1b[999~"), null);
 });

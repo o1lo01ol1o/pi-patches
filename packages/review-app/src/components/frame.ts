@@ -5,7 +5,7 @@ import { computeFrameLayout } from "../layout.ts";
 import { renderDiffPane } from "./diff-pane.ts";
 import { renderFileTree } from "./file-tree.ts";
 import { renderStatusBar } from "./status-bar.ts";
-import { currentDiffVisualMap, type AppState } from "../state.ts";
+import { currentDiffVisualMap, sessionPatchPosition, type AppState } from "../state.ts";
 
 export function renderFrame(state: AppState, width: number, height: number): string[] {
   const { rows, columns, bodyRows, bodyTop, treeWidth, diffWidth } = computeFrameLayout(width, height);
@@ -17,10 +17,21 @@ export function renderFrame(state: AppState, width: number, height: number): str
   const tintLegend = showProvenance && state.view === "cumulative" && state.renderMode === "syntax" && state.tintMode !== "off" ? " old ░▒▓█ new" : "";
   const visibleRenderMode = state.view === "history" ? "native" : state.renderMode;
   const tint = showProvenance && state.view === "cumulative" ? ` · tint:${state.tintMode}${tintLegend}` : "";
-  if (rows >= 3) lines.push(pad(`${selectedPath} · ${state.view} · ${visibleRenderMode}${tint} · ${state.wrapLines ? "wrap" : "nowrap"}`, columns));
+  const patchPosition = sessionPatchPosition(state);
+  const patchNavigation = patchPosition === null
+    ? ""
+    : ` · patch ${patchPosition.index + 1}/${patchPosition.total}${patchPosition.following ? " · following" : ""}`;
+  if (rows >= 3) lines.push(pad(`${selectedPath} · ${state.view} · ${visibleRenderMode}${patchNavigation}${tint} · ${state.wrapLines ? "wrap" : "nowrap"}`, columns));
 
   if (state.activeTab === "diff") {
-    const treeLines = renderFileTree(state.files, state.selectedFile, state.annotations, state.scrollTop.tree, bodyRows);
+    const treeLines = renderFileTree(
+      state.files,
+      state.selectedFile,
+      state.annotations,
+      state.scrollTop.tree,
+      bodyRows,
+      { mode: state.tintMode, colorDepth: state.colorDepth, theme: state.tintTheme }
+    );
     const file = state.files[state.selectedFile];
     const fileAnnotations = file ? state.annotations.filter((annotation) => annotation.fileId === file.row.id) : [];
     const fileHistory = file ? state.historyEntries.filter((entry) => entry.fileId === file.row.id) : [];
@@ -215,9 +226,9 @@ function overlayLines(state: AppState, width: number, height: number): string[] 
       "gg/G top/bottom      {/} hunk                  [/ ] file",
       "h/l/tab focus        Enter focus diff           v visual selection",
       "c comment            a annotations              S submit drafts",
-      "H history            n/p patch in history       d native/syntax",
-      "w wrap               t tint                     r refresh",
-      "I guidelines         ? help                     q quit   Esc close",
+      "H history   n/p previous/next patch   f follow latest patch",
+      "d native/syntax   w wrap   t tint   r refresh",
+      "I guidelines   ? help   q quit   Esc close",
       "Annotations: j/k select, Enter jump, e edit, u re-anchor, x delete"
     ], width, height);
   }
