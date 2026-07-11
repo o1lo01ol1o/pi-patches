@@ -15,7 +15,9 @@ export function renderFrame(state: AppState, width: number, height: number): str
   const selectedPath = selectedFile?.row.path ?? "no selected file";
   const showProvenance = state.dataset.source.kind === "session";
   const tintLegend = showProvenance && state.view === "cumulative" && state.renderMode === "syntax" && state.tintMode !== "off" ? " old ░▒▓█ new" : "";
-  const visibleRenderMode = state.view === "history" ? "native" : state.renderMode;
+  const visibleRenderMode = state.view === "history"
+    ? state.dataset.source.kind === "session" && state.historyEntries.length === 0 ? "file" : "native"
+    : state.renderMode;
   const tint = showProvenance && state.view === "cumulative" ? ` · tint:${state.tintMode}${tintLegend}` : "";
   const patchPosition = sessionPatchPosition(state);
   const patchNavigation = patchPosition === null
@@ -59,7 +61,8 @@ export function renderFrame(state: AppState, width: number, height: number): str
           selectedRange: selectedRange(state),
           showProvenance,
           wrapLines: state.wrapLines,
-          visualMap: currentDiffVisualMap(state, width, height)
+          visualMap: currentDiffVisualMap(state, width, height),
+          landingPhase: state.patchLanding?.phase ?? null
         })
       : ["No selected documents."];
 

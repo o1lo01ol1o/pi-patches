@@ -13,6 +13,7 @@ import {
   applyBackgroundToLine,
   changeTintWithDepth,
   detectTintTheme,
+  landedTint,
   selectionTint,
   stripAnsi,
   truncateVisible,
@@ -84,6 +85,12 @@ test("change tint supports truecolor and 256-color fallback", () => {
 test("selection tint follows dark and light theme backgrounds", () => {
   assert.match(selectionTint("truecolor", "dark")("x"), /48;2;58;58;74m/);
   assert.match(selectionTint("truecolor", "light")("x"), /48;2;208;208;224m/);
+});
+
+test("landed tint fades across themes with a 256-color fallback", () => {
+  assert.equal(landedTint("truecolor", "dark", 0)("x"), "\x1b[48;2;47;120;72mx\x1b[49m");
+  assert.equal(landedTint("truecolor", "light", 5)("x"), "\x1b[48;2;220;246;227mx\x1b[49m");
+  assert.match(landedTint("ansi256", "dark", 2)("x"), /^\x1b\[48;5;\d+mx\x1b\[49m$/);
 });
 
 test("detectTintTheme derives dark and light variants from the environment", () => {

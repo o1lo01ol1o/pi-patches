@@ -213,8 +213,14 @@ move through global patch sequence and select each patch's file. `f` switches to
 history, jumps to the newest patch, and follows patches appended by the connected
 session. Manual patch or file navigation disables following. Annotation-only
 refreshes preserve the current cursor and scroll instead of forcing a tail jump.
+Each landing replays the selected file through that patch and shows the complete
+post-patch file, with the cursor positioned at the first changed line. Lines
+touched by the landed patch briefly fade from a theme-aware green background;
+unchanged lines remain untinted. A broken replay chain is reported explicitly
+instead of displaying a partial or guessed file. Snapshots, syntax highlighting,
+and visual row maps are cached, so animation frames compose only the visible rows.
 For per-commit Git sources, `n`/`p` browse the selected file's commit history and
-`f` is unavailable.
+retain native per-commit diffs; `f` is unavailable.
 
 Syntax mode highlights source code and, for session cumulative diffs, attributes
 lines to patch recency. Tint mode cycles between a recency gradient, a uniform

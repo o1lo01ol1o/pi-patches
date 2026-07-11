@@ -430,11 +430,11 @@ Unknown input sequences parse to *no* event (dropped explicitly), so `update` ne
    - Gradient applies to syntax mode only; native mode is pi's verbatim `renderDiff` (uniform colors by design). `t` key cycles tint: `gradient → uniform → off`.
 4. Selection rows override the tint with `theme.getBgAnsi("selectedBg")`; annotated ranges get a `●` gutter marker, external (bash/manual) changes a `~` marker.
 
-**Native mode** (`d` toggles): `renderDiff(displayDiff, {filePath})` verbatim — pixel-identical to pi's chat rendering, including intra-line word-diff inverse. Cumulative native view feeds `generateDiffString(baseline, current).diff` into it; history view feeds the stored `display_diff` per patch.
+**Native mode** (`d` toggles): `renderDiff(displayDiff, {filePath})` verbatim — pixel-identical to pi's chat rendering, including intra-line word-diff inverse. Cumulative native view feeds `generateDiffString(baseline, current).diff` into it; Git per-commit history feeds the source adapter's stored per-file display diff.
 
-**History view** (`H` toggles): the selected file's patches in `seq` order, one at a time (`n`/`p`), header `patch 3/7 · edit · 14:02:31`, rendered in native mode.
+**History view** (`H` toggles): session patches form one global `seq`-ordered stream across files. Landing via `n`, `p`, or `f` selects the patch's file, replays that file from its checked baseline through the selected patch, and renders the complete syntax-highlighted post-patch file under `patch 3/7 · full file after edit · 14:02:31`. The cursor lands at `first_changed_line` and scrolls it into the upper third of the viewport. Lines added or replaced by that patch, or the surviving anchor line for a pure deletion, receive a six-frame theme-aware green fade at 120 ms per frame. Replay failure renders an explicit chain-break message; it never substitutes the isolated patch or a guessed partial file. Git per-commit history remains an isolated native diff.
 
-**Caches** (all keyed by content hash, sha256 computed once per read): highlighted-lines LRU (~20 versions ≈ current+baseline per file), diff model per `(baselineHash, currentHash)`, `renderDiff` output per patch id. Composition of the ~50 visible rows happens per frame, uncached — string concat of pre-rendered pieces, well under a millisecond; pi-tui coalesces renders to ~60 fps and wraps frames in synchronized-output (`\x1b[?2026`, `tui.ts:1286-1308`), so the app stays flicker-free.
+**Caches** (all keyed by checked identities/content hashes, sha256 computed once per read): highlighted-lines LRU (~20 versions ≈ current+baseline per file), diff model per `(baselineHash, currentHash)`, native `renderDiff` output per source entry, full-file patch snapshots by patch-array identity/baseline/patch id with incremental replay, and visual row maps by selected version and width. Composition of the ~50 visible rows happens per frame, uncached — string concat of pre-rendered pieces, well under a millisecond; pi-tui coalesces renders to ~60 fps and wraps frames in synchronized-output (`\x1b[?2026`, `tui.ts:1286-1308`), so the app stays flicker-free.
 
 ### 6.5 Input
 
@@ -537,6 +537,8 @@ Expect `write` (seq 1, file row with `baseline_missing=1`) then `edit` (seq 2); 
 **Phase 4 — submit end-to-end.** With pi idle: `S`/`y` → message arrives as a user turn, model addresses numbered items, rows flip to `sent` with one shared `batch_id`, TUI reflects it. With pi mid-stream: delivered as steer without throwing. Double-`S` race produces exactly one batch (claim transaction).
 
 **Phase 5 — embedded integration and polish.** `/patches` reports the current id and `/patches connect <id-or-prefix>` opens the reusable component through `ctx.ui.custom()`. Component disposal clears only owned timers/watchers/listeners; `q` restores pi's editor/footer. Prove no terminal-launch commands or `/review` registration exist. Help overlay complete; standalone `pi-review --list` remains compatible; README reflects the embedded default.
+
+**Phase 6 — patch landings.** Build a checked multi-patch fixture whose second patch changes a non-adjacent line. `n`/`p`/`f` must select the global patch's file, render every line of that file at the selected post-state, place the cursor at `first_changed_line`, and keep earlier patch effects visible. The raw frame must apply the phase-zero landing background to touched lines only; six timer ticks remove it without changing selection or scroll. Boundary navigation must not restart the animation. Repeat with a cross-file append while following, a pure deletion, dark/light themes, ANSI-256 fallback, long wrapped lines, and an injected hash-chain break. The broken chain must say that the snapshot is unavailable and must not render an isolated patch as though it were the file.
 
 ---
 
@@ -887,7 +889,13 @@ history at the newest patch and enables an explicit follow-latest state. While
 following, a database refresh that appends patches advances to the new tail.
 Manual patch or file navigation disables following. Git per-commit history keeps
 its source-local commit navigation and does not claim to follow live patches.
-The title exposes global patch position and whether follow mode is active.
+The title exposes global patch position and whether follow mode is active. Every
+session landing shows the complete file as it existed after that patch,
+positions the viewport around the first changed line, and briefly fades a green
+background over only the lines touched by the landed patch. Snapshot replay,
+syntax highlighting, and visual
+mapping are cached; a chain break is an explicit unavailable state rather than a
+partial rendering. Git per-commit mode continues to show the isolated commit diff.
 
 File rows render addition and deletion counts as separate change surfaces:
 non-zero `+N` uses the add background and non-zero `-N` uses the delete

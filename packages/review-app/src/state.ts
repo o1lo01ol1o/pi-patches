@@ -30,6 +30,7 @@ import {
   type DiffVisualMap
 } from "./render/diff-wrap.ts";
 import { fileIndexAtTreeRow, fileTreeRowCount, treeRowForFileIndex } from "./render/file-tree-model.ts";
+import { buildPatchFileSnapshot } from "./render/patch-snapshot.ts";
 import { mapRangeThroughPatches, mapRangeThroughTexts, patchesAfterAnchor, type LineRange } from "./render/reanchor.ts";
 
 export type FileState = {
@@ -117,6 +118,7 @@ export type AppState = {
   tintTheme: TintTheme;
   patchIdx: number;
   followLatestPatch: boolean;
+  patchLanding: { patchId: PatchId; phase: number } | null;
   cursorRow: DiffRow;
   annotationCursor: number;
   scrollTop: { tree: number; diff: number };
@@ -152,6 +154,7 @@ export type AppEvent =
   | { kind: "analysisFinished"; run: AnalysisRun }
   | { kind: "analysisFailed"; message: string }
   | { kind: "resize"; cols: number; rows: number }
+  | { kind: "animationTick" }
   | { kind: "tick" };
 
 export type Effect =
@@ -200,6 +203,7 @@ export function update(state: AppState, event: AppEvent): { state: AppState; eff
     };
   }
   if (event.kind === "resize") return applyResize(state, event.cols, event.rows);
+  if (event.kind === "animationTick") return advancePatchLanding(state);
   if (event.kind === "tick") return tick(state);
   switch (state.mode.kind) {
     case "comment":
@@ -264,6 +268,7 @@ export function update(state: AppState, event: AppEvent): { state: AppState; eff
           view: state.view === "cumulative" ? "history" : "cumulative",
           patchIdx: 0,
           followLatestPatch: false,
+          patchLanding: null,
           cursorRow: diffRow(0),
           scrollTop: { ...state.scrollTop, diff: 0 }
         },
@@ -537,6 +542,15 @@ function tick(state: AppState): { state: AppState; effects: Effect[] } {
   };
 }
 
+function advancePatchLanding(state: AppState): { state: AppState; effects: Effect[] } {
+  if (state.patchLanding === null) return { state, effects: [] };
+  const phase = state.patchLanding.phase + 1;
+  return {
+    state: { ...state, patchLanding: phase >= 6 ? null : { ...state.patchLanding, phase } },
+    effects: []
+  };
+}
+
 function nextTintMode(mode: AppState["tintMode"]): AppState["tintMode"] {
   switch (mode) {
     case "gradient":
@@ -793,6 +807,9 @@ function moveCursorToDiffRow(state: AppState, row: number): { state: AppState; e
 }
 
 function moveToHunk(state: AppState, direction: -1 | 1): { state: AppState; effects: Effect[] } {
+  if (state.view === "history" && state.dataset.source.kind === "session" && state.historyEntries.length === 0) {
+    return { state: { ...state, pendingKey: null, statusMessage: "Hunk navigation is unavailable in full-file patch view" }, effects: [] };
+  }
   const rows = currentDiffRows(state);
   const cursor = Number(state.cursorRow);
   const hunkRows = rows
@@ -846,6 +863,7 @@ function selectFileAt(state: AppState, index: number, viewportRows: number): { s
       focusedPane: "tree",
       patchIdx: 0,
       followLatestPatch: false,
+      patchLanding: null,
       cursorRow: diffRow(0),
       selection: null,
       scrollTop: { ...state.scrollTop, diff: 0, tree: scrollTopFor(treeRow, state.scrollTop.tree, viewportRows) }
@@ -864,6 +882,7 @@ function selectPatch(state: AppState, delta: number): { state: AppState; effects
     const position = sessionPatchPosition(state);
     const current = position?.index ?? (delta > 0 ? -1 : timeline.ordered.length);
     const target = clamp(current + delta, 0, timeline.ordered.length - 1);
+    if (position !== null && target === current) return { state, effects: [] };
     return { state: selectSessionPatchAt(state, target, false), effects: [] };
   }
   const count = historyCountForFile(state, file.row.id);
@@ -910,13 +929,15 @@ function selectSessionPatchAt(state: AppState, index: number, following: boolean
     return { ...state, followLatestPatch: false, statusMessage: `Patch ${patch.seq} file is no longer tracked` };
   }
   const treeRow = treeRowForFileIndex(state.files, selectedFile) ?? selectedFile;
-  return {
+  const patchIdx = timeline.localIndexById.get(patch.id) ?? 0;
+  let next: AppState = {
     ...state,
     selectedFile,
     focusedPane: "diff",
     view: "history",
-    patchIdx: timeline.localIndexById.get(patch.id) ?? 0,
+    patchIdx,
     followLatestPatch: following,
+    patchLanding: { patchId: patch.id, phase: 0 },
     cursorRow: diffRow(0),
     selection: null,
     scrollTop: {
@@ -924,6 +945,23 @@ function selectSessionPatchAt(state: AppState, index: number, following: boolean
       diff: 0
     },
     statusMessage: `${following ? "Following" : "Patch"} ${targetIndex + 1}/${timeline.ordered.length}`
+  };
+  const selectedFileState = next.files[selectedFile];
+  if (!selectedFileState) return next;
+  const snapshot = buildPatchFileSnapshot(selectedFileState, next.patches, patchIdx);
+  if (snapshot.kind !== "snapshot") return next;
+  const logicalRow = snapshot.value.landingLine;
+  next = { ...next, cursorRow: diffRow(logicalRow) };
+  const map = currentDiffVisualMap(next);
+  const visualRow = visualStartForLogicalRow(map, logicalRow);
+  const visibleRows = viewportRows(next);
+  const maxScroll = Math.max(0, map.visualRowCount - visibleRows);
+  return {
+    ...next,
+    scrollTop: {
+      ...next.scrollTop,
+      diff: clamp(visualRow - Math.floor(visibleRows / 3), 0, maxScroll)
+    }
   };
 }
 
@@ -1301,6 +1339,16 @@ function currentDiffRows(state: AppState): DiffModelRow[] {
     if (history.length > 0) {
       const entry = history[Math.max(0, Math.min(state.patchIdx, history.length - 1))];
       return entry ? entry.displayDiff.split("\n").map((text) => ({ kind: "hunk" as const, text })) : [];
+    }
+    if (state.dataset.source.kind === "session") {
+      const snapshot = buildPatchFileSnapshot(file, state.patches, state.patchIdx);
+      if (snapshot.kind === "snapshot") {
+        return [
+          { kind: "hunk", text: "patch file snapshot" },
+          ...snapshot.value.lines.map((text) => ({ kind: "hunk" as const, text }))
+        ];
+      }
+      return [{ kind: "hunk", text: snapshot.kind === "empty" ? "No recorded patches" : snapshot.message }];
     }
     const patches = state.patches.filter((patch) => patch.fileId === file.row.id);
     const patch = patches[Math.max(0, Math.min(state.patchIdx, patches.length - 1))];

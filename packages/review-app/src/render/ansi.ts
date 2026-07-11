@@ -49,6 +49,28 @@ export function selectionTint(depth: ColorDepth, theme: TintTheme): BgFn {
   return depth === "truecolor" ? bgTruecolor(rgb) : bgAnsi256(rgbToAnsi256(rgb));
 }
 
+export function landedTint(depth: ColorDepth, theme: TintTheme, phase: number): BgFn {
+  const dark: readonly Rgb[] = [
+    [0x2f, 0x78, 0x48],
+    [0x27, 0x66, 0x3d],
+    [0x21, 0x55, 0x34],
+    [0x1c, 0x45, 0x2c],
+    [0x18, 0x37, 0x25],
+    [0x15, 0x2c, 0x20]
+  ];
+  const light: readonly Rgb[] = [
+    [0x8c, 0xdd, 0xa5],
+    [0xa0, 0xe5, 0xb5],
+    [0xb2, 0xeb, 0xc3],
+    [0xc2, 0xef, 0xcf],
+    [0xd0, 0xf3, 0xda],
+    [0xdc, 0xf6, 0xe3]
+  ];
+  const palette = theme === "dark" ? dark : light;
+  const rgb = palette[Math.max(0, Math.min(palette.length - 1, Math.floor(phase)))] ?? palette[palette.length - 1];
+  return depth === "truecolor" ? bgTruecolor(rgb) : bgAnsi256(rgbToAnsi256(rgb));
+}
+
 export function diffGutter(kind: "add" | "del" | "context", text: string): string {
   const color = kind === "add" ? 32 : kind === "del" ? 31 : 90;
   return `\x1b[${color}m${text}\x1b[39m`;

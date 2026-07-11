@@ -145,6 +145,9 @@ export function createReviewComponent(
   const pendingKeyTimer = setInterval(() => {
     if (!disposed && state.pendingKey) dispatch({ kind: "tick" });
   }, 500);
+  const patchLandingTimer = setInterval(() => {
+    if (!disposed && state.patchLanding !== null) dispatch({ kind: "animationTick" });
+  }, 120);
 
   const removeMouseListener = tui.addInputListener((data) => {
     const events = parseSgrMouseEvents(data);
@@ -444,6 +447,7 @@ export function createReviewComponent(
     disableComponentMouse?.();
     clearInterval(refreshTimer);
     clearInterval(pendingKeyTimer);
+    clearInterval(patchLandingTimer);
     removeMouseListener();
     commentOverlay?.handle.hide();
     commentOverlay = null;

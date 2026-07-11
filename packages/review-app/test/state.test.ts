@@ -236,24 +236,63 @@ test("draftForCursor snaps selections spanning deletions to current-version line
   assert.equal(Number(draft?.anchor.end), 2);
 });
 
-test("history mode navigates selected file patches and renders the current patch", () => {
+test("history navigation renders the full post-patch file and animates landed lines", () => {
   initTheme("dark");
+  const baseline = "zero\nmiddle\ntail\n";
+  const afterFirst = "one\nmiddle\ntail\n";
+  const afterSecond = "one\nmiddle\nfinal\n";
   const state = fixtureState({
+    files: [makeFile(1, "example.txt", baseline, afterSecond)],
     view: "history",
     patches: [
-      makePatch({ id: 1, seq: 1, displayDiff: "-1 zero\n+1 one" }),
-      makePatch({ id: 2, seq: 2, displayDiff: "-2 two\n+2 three", createdAt: Date.UTC(2026, 0, 1, 14, 2, 31) })
+      makePatch({
+        id: 1,
+        seq: 1,
+        unifiedPatch: "--- a/example.txt\n+++ b/example.txt\n@@ -1,3 +1,3 @@\n-zero\n+one\n middle\n tail\n",
+        preHash: hashContent(baseline),
+        postHash: hashContent(afterFirst),
+        firstChangedLine: 1
+      }),
+      makePatch({
+        id: 2,
+        seq: 2,
+        unifiedPatch: "--- a/example.txt\n+++ b/example.txt\n@@ -1,3 +1,3 @@\n one\n middle\n-tail\n+final\n",
+        preHash: hashContent(afterFirst),
+        postHash: hashContent(afterSecond),
+        firstChangedLine: 3,
+        createdAt: Date.UTC(2026, 0, 1, 14, 2, 31)
+      })
     ]
   });
 
   const next = update(state, { kind: "key", key: "n" });
   assert.equal(next.state.patchIdx, 1);
-  const clamped = update(next.state, { kind: "key", key: "n" });
+  assert.equal(Number(next.state.cursorRow), 3);
+  assert.deepEqual(next.state.patchLanding, { patchId: 2, phase: 0 });
+  const animated = update(next.state, { kind: "animationTick" }).state;
+  const clamped = update(animated, { kind: "key", key: "n" });
   assert.equal(clamped.state.patchIdx, 1);
+  assert.deepEqual(clamped.state.patchLanding, { patchId: 2, phase: 1 });
 
-  const frame = stripAnsi(renderFrame(next.state, 80, 8).join("\n"));
-  assert.match(frame, /patch 2\/2 · edit · 14:02:31/);
-  assert.match(frame, /\+2 three/);
+  const rawFrame = renderFrame(next.state, 100, 10);
+  const frame = stripAnsi(rawFrame.join("\n"));
+  assert.match(frame, /patch 2\/2 · full file after edit · 14:02:31/);
+  assert.match(frame, /1 │ one/);
+  assert.match(frame, /2 │ middle/);
+  assert.match(frame, /3 │ final/);
+  assert.match(rawFrame.find((line) => stripAnsi(line).includes("3 │ final")) ?? "", /\x1b\[48;2;47;120;72m/);
+  assert.doesNotMatch(rawFrame.find((line) => stripAnsi(line).includes("2 │ middle")) ?? "", /\x1b\[48;2;47;120;72m/);
+
+  let settled = next.state;
+  for (let phase = 0; phase < 6; phase++) settled = update(settled, { kind: "animationTick" }).state;
+  assert.equal(settled.patchLanding, null);
+  assert.doesNotMatch(renderFrame(settled, 100, 10).join("\n"), /\x1b\[48;2;47;120;72m/);
+
+  const previous = update(settled, { kind: "key", key: "p" }).state;
+  const previousFrame = stripAnsi(renderFrame(previous, 100, 10).join("\n"));
+  assert.match(previousFrame, /patch 1\/2 · full file after edit/);
+  assert.match(previousFrame, /3 │ tail/);
+  assert.doesNotMatch(previousFrame, /3 │ final/);
 });
 
 test("session patch navigation crosses file boundaries in chronological order", () => {
@@ -1556,6 +1595,7 @@ function fixtureState(overrides: Partial<AppState> = {}): AppState {
     tintTheme: "dark",
     patchIdx: 0,
     followLatestPatch: false,
+    patchLanding: null,
     cursorRow: 2 as DiffRow,
     annotationCursor: 0,
     scrollTop: { tree: 0, diff: 0 },
@@ -1680,7 +1720,7 @@ function makeFile(id = 1, relPath = "example.txt", baseline = "zero\ntwo\n", cur
   };
 }
 
-function makePatch(overrides: Partial<{ id: number; fileId: number; seq: number; displayDiff: string; unifiedPatch: string; preHash: ContentHash; postHash: ContentHash; createdAt: number }> = {}): PatchRecord {
+function makePatch(overrides: Partial<{ id: number; fileId: number; seq: number; displayDiff: string; unifiedPatch: string; preHash: ContentHash; postHash: ContentHash; firstChangedLine: number | null; createdAt: number }> = {}): PatchRecord {
   const sessionId = unwrap(checkedSessionId("state-test-session"));
   return {
     id: (overrides.id ?? 1) as PatchId,
@@ -1691,7 +1731,7 @@ function makePatch(overrides: Partial<{ id: number; fileId: number; seq: number;
     toolCallId: "call-1",
     unifiedPatch: overrides.unifiedPatch ?? "",
     displayDiff: overrides.displayDiff ?? "-1 zero\n+1 one",
-    firstChangedLine: 1,
+    firstChangedLine: overrides.firstChangedLine === undefined ? 1 : overrides.firstChangedLine,
     preHash: overrides.preHash ?? hashContent("zero\ntwo\n"),
     postHash: overrides.postHash ?? hashContent("one\ntwo\n"),
     createdAt: overrides.createdAt ?? 2

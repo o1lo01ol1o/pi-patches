@@ -5,6 +5,7 @@ import {
   applyBackgroundToLine,
   changeTint,
   diffGutter,
+  landedTint,
   selectionTint,
   truncateVisible,
   type ColorDepth,
@@ -18,6 +19,7 @@ import {
   type DiffVisualMap
 } from "../render/diff-wrap.ts";
 import { createHighlightCache } from "../render/highlight-cache.ts";
+import { buildPatchFileSnapshot, type PatchFileSnapshotResult } from "../render/patch-snapshot.ts";
 import type { DatasetHistoryEntry, FileState } from "../state.ts";
 import type { PatchRecord } from "@pi-patches/store";
 
@@ -45,6 +47,7 @@ export type DiffPaneOptions = {
   showProvenance: boolean;
   wrapLines?: boolean;
   visualMap?: DiffVisualMap;
+  landingPhase?: number | null;
 };
 
 export type DiffPaneVisualOptions = Pick<
@@ -55,6 +58,7 @@ export type DiffPaneVisualOptions = Pick<
 const syntaxHunkPrefixWidth = 9;
 const syntaxCodePrefixWidth = 12;
 const nativePrefixWidth = 3;
+const fileSnapshotPrefixWidth = 11;
 
 export function renderDiffPane(
   file: FileState,
@@ -63,7 +67,11 @@ export function renderDiffPane(
   options: DiffPaneOptions
 ): string[] {
   const visualMap = options.visualMap ?? buildDiffPaneVisualMap(file, patches, options);
-  if (options.view === "history") return renderHistoryPane(file, patches, { ...options, visualMap });
+  if (options.view === "history") {
+    return options.historyEntry
+      ? renderHistoryPane(file, patches, { ...options, visualMap })
+      : renderPatchSnapshotPane(file, patches, { ...options, visualMap });
+  }
   if (options.renderMode === "native") {
     const key = `cumulative:${file.row.path}:${baselineHash(file)}:${file.currentHash}`;
     return renderNativeVisualRows(nativeLogicalLines(key, cumulativeDisplayDiff(file), file.row.path), { ...options, visualMap });
@@ -83,8 +91,14 @@ export function buildDiffPaneVisualMap(
 
   let map: DiffVisualMap;
   if (options.view === "history") {
-    const lines = historyLogicalLines(file, patches, options);
-    map = buildDiffVisualMap(lines, () => Math.max(1, options.width - nativePrefixWidth), wrap);
+    const lines = options.historyEntry
+      ? historyLogicalLines(file, patches, options)
+      : patchSnapshotLogicalLines(buildPatchFileSnapshot(file, patches, options.patchIdx));
+    map = buildDiffVisualMap(
+      lines,
+      (index) => Math.max(1, options.width - (options.historyEntry || index === 0 ? nativePrefixWidth : fileSnapshotPrefixWidth)),
+      wrap
+    );
   } else if (options.renderMode === "native") {
     const key = `cumulative:${file.row.path}:${baselineHash(file)}:${file.currentHash}`;
     const lines = nativeLogicalLines(key, cumulativeDisplayDiff(file), file.row.path);
@@ -280,6 +294,72 @@ function renderHistoryPane(
   options: DiffPaneOptions & { visualMap: DiffVisualMap }
 ): string[] {
   return renderNativeVisualRows(historyLogicalLines(file, patches, options), options);
+}
+
+function renderPatchSnapshotPane(
+  file: FileState,
+  patches: readonly PatchRecord[],
+  options: DiffPaneOptions & { visualMap: DiffVisualMap }
+): string[] {
+  const result = buildPatchFileSnapshot(file, patches, options.patchIdx);
+  const logicalLines = patchSnapshotLogicalLines(result);
+  const snapshot = result.kind === "snapshot" ? result.value : null;
+  const highlighted = snapshot
+    ? highlightedLines(file.row.path, snapshot.content, snapshot.hash)
+    : logicalLines;
+  const segmentCache = new Map<number, string[]>();
+  const lines: string[] = [];
+  for (let visualRow = options.startRow; visualRow < options.startRow + options.height; visualRow++) {
+    const ref = visualRowRef(options.visualMap, visualRow);
+    if (!ref) break;
+    const isHeader = ref.logicalRow === 0;
+    const content = isHeader
+      ? logicalLines[0] ?? ""
+      : snapshot
+        ? highlighted[ref.logicalRow - 1] ?? logicalLines[ref.logicalRow] ?? ""
+        : logicalLines[ref.logicalRow] ?? "";
+    let segments = segmentCache.get(ref.logicalRow);
+    if (!segments) {
+      segments = wrapLineSegments(
+        content,
+        Math.max(1, options.width - (isHeader ? nativePrefixWidth : fileSnapshotPrefixWidth)),
+        options.wrapLines ?? true
+      );
+      segmentCache.set(ref.logicalRow, segments);
+    }
+    const cursor = ref.logicalRow === options.cursorRow ? ">" : " ";
+    const continuation = ref.segmentIndex > 0 ? "↳" : " ";
+    const prefix = isHeader
+      ? `${cursor}${continuation} `
+      : snapshotPrefix(ref.logicalRow, cursor, continuation, ref.segmentIndex > 0);
+    const line = truncateVisible(`${prefix}${segments[ref.segmentIndex] ?? ""}`, options.width);
+    const landingPhase = options.landingPhase;
+    const landed =
+      snapshot !== null &&
+      landingPhase !== null &&
+      landingPhase !== undefined &&
+      snapshot.changedLines.has(ref.logicalRow);
+    lines.push(landed
+      ? applyBackgroundToLine(line, options.width, landedTint(options.colorDepth, options.tintTheme, landingPhase))
+      : line);
+  }
+  return lines;
+}
+
+function patchSnapshotLogicalLines(result: PatchFileSnapshotResult): string[] {
+  if (result.kind === "empty") return ["No recorded patches for this file."];
+  if (result.kind === "chainBreak") return ["Patch snapshot unavailable", result.message];
+  const snapshot = result.value;
+  return [
+    `patch ${snapshot.index + 1}/${snapshot.total} · full file after ${snapshot.patch.tool} · ${formatPatchTime(snapshot.patch.createdAt)}`,
+    ...snapshot.lines
+  ];
+}
+
+function snapshotPrefix(lineNumber: number, cursor: string, marker: string, continuation: boolean): string {
+  return continuation
+    ? `${cursor}${marker}       │ `
+    : `${cursor}${marker} ${String(lineNumber).padStart(5, " ")} │ `;
 }
 
 function cumulativeDisplayDiff(file: FileState): string {
