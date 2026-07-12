@@ -20,6 +20,7 @@ import {
 } from "../render/diff-wrap.ts";
 import { createHighlightCache } from "../render/highlight-cache.ts";
 import { buildPatchFileSnapshot, type PatchFileSnapshotResult } from "../render/patch-snapshot.ts";
+import { attributionKey, patchAgeRanks } from "../render/patch-age.ts";
 import type { DatasetHistoryEntry, FileState } from "../state.ts";
 import type { PatchRecord } from "@pi-patches/store";
 
@@ -28,7 +29,7 @@ const blameCache = createBlameCache();
 const attributedModelCache = new Map<string, DiffModel>();
 const nativeDiffCache = new Map<string, string[]>();
 const visualMapCache = new Map<string, DiffVisualMap>();
-const attributionRankCache = new WeakMap<DiffModel, ReadonlyMap<string, number>>();
+const attributionAgeRankCache = new WeakMap<DiffModel, ReadonlyMap<string, number>>();
 const renderCacheLimit = 100;
 
 export type DiffPaneOptions = {
@@ -47,7 +48,7 @@ export type DiffPaneOptions = {
   showProvenance: boolean;
   wrapLines?: boolean;
   visualMap?: DiffVisualMap;
-  landingPhase?: number | null;
+  patchLanding?: { patchId: number; phase: number } | null;
 };
 
 export type DiffPaneVisualOptions = Pick<
@@ -123,7 +124,7 @@ function renderCumulativeSyntax(
 ): string[] {
   const model = buildAttributedDiffModel(file, patches, options.showProvenance);
   const highlighted = highlightedVersions(file);
-  const ranks = attributionRanks(model);
+  const ranks = attributionRanks(model, patches);
   const segmentCache = new Map<number, string[]>();
   const lines: string[] = [];
   for (let visualRow = options.startRow; visualRow < options.startRow + options.height; visualRow++) {
@@ -333,15 +334,21 @@ function renderPatchSnapshotPane(
       ? `${cursor}${continuation} `
       : snapshotPrefix(ref.logicalRow, cursor, continuation, ref.segmentIndex > 0);
     const line = truncateVisible(`${prefix}${segments[ref.segmentIndex] ?? ""}`, options.width);
-    const landingPhase = options.landingPhase;
+    const landingPhase = options.patchLanding?.phase;
     const landed =
       snapshot !== null &&
+      Number(snapshot.patch.id) === options.patchLanding?.patchId &&
       landingPhase !== null &&
       landingPhase !== undefined &&
       snapshot.changedLines.has(ref.logicalRow);
-    lines.push(landed
-      ? applyBackgroundToLine(line, options.width, landedTint(options.colorDepth, options.tintTheme, landingPhase))
-      : line);
+    const attribution = snapshot?.lineAttributions[ref.logicalRow - 1];
+    const ageBackground = attribution
+      ? changeTint("add", snapshot?.ageRanks.get(attributionKey(attribution)) ?? 1, options.tintMode, options.colorDepth, options.tintTheme)
+      : null;
+    const background = landed
+      ? landedTint(options.colorDepth, options.tintTheme, landingPhase)
+      : ageBackground;
+    lines.push(background ? applyBackgroundToLine(line, options.width, background) : line);
   }
   return lines;
 }
@@ -451,31 +458,15 @@ function rowBackground(
   return changeTint(row.kind, ranks.get(attributionKey(row.attribution)) ?? 1, mode, depth, theme);
 }
 
-function attributionRanks(model: DiffModel): ReadonlyMap<string, number> {
-  const cached = attributionRankCache.get(model);
+function attributionRanks(model: DiffModel, patches: readonly PatchRecord[]): ReadonlyMap<string, number> {
+  const cached = attributionAgeRankCache.get(model);
   if (cached) return cached;
-  const patchSeqs = new Set<number>();
-  let hasExternal = false;
-  for (const row of model.rows) {
-    const attribution = "attribution" in row ? row.attribution : undefined;
-    if (!attribution) continue;
-    if (attribution.kind === "external") {
-      hasExternal = true;
-    } else {
-      patchSeqs.add(Number(attribution.seq));
-    }
-  }
-  const ordered = [...patchSeqs].sort((a, b) => a - b).map((seq) => `patch:${seq}`);
-  if (hasExternal) ordered.push("external");
-  const result = new Map<string, number>();
-  const denominator = Math.max(1, ordered.length - 1);
-  ordered.forEach((key, index) => result.set(key, ordered.length === 1 ? 1 : index / denominator));
-  attributionRankCache.set(model, result);
+  const result = patchAgeRanks(
+    patches,
+    model.rows.map((row) => "attribution" in row ? row.attribution : undefined)
+  );
+  attributionAgeRankCache.set(model, result);
   return result;
-}
-
-function attributionKey(attribution: Attribution): string {
-  return attribution.kind === "external" ? "external" : `patch:${Number(attribution.seq)}`;
 }
 
 function splitLines(content: string): string[] {

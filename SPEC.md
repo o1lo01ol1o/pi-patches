@@ -422,9 +422,9 @@ Unknown input sequences parse to *no* event (dropped explicitly), so `update` ne
 **Syntax mode** (default): per visible row —
 1. Gutter `±NNNN │` colored with `theme.fg("toolDiffAdded" | "toolDiffRemoved" | "toolDiffContext")` (same tokens pi's own diff renderer uses, `diff.ts`).
 2. Content from the highlight cache: `highlightCode(entireFileContent, getLanguageFromPath(path))` split into lines — current-version lines for `add`/`context` rows, baseline-version lines for `del` rows.
-3. **Recency-gradient background tint** applied with the vendored `applyBackgroundToLine`, using our own SGR constants (truecolor + 256-color fallback) — pi's theme has **no** diff-background tokens (its `ThemeBg` union is selection/message/tool backgrounds only, `theme.ts:154-160`). **Verified safe to compose:** `theme.fg` and `highlightCode` emit `\x1b[39m` (fg-only reset, `theme.ts:354`) — never `\x1b[0m` — so a row-level background survives intra-line syntax colors.
-   - The tint intensity encodes **change recency**: additions run light-green → saturated green, deletions light-pink → saturated red; the most recent changes are fully saturated.
-   - `t = rank(row.seq) / (distinctSeqCount − 1)` where ranks are the **normalized order** of the distinct patch `seq`s contributing rows to the current file view (oldest = 0, newest = 1; single-patch files render fully saturated; `seq = "external"` counts as newest).
+3. **Persisted-age background tint** applied with the vendored `applyBackgroundToLine`, using our own SGR constants (truecolor + 256-color fallback) — pi's theme has **no** diff-background tokens (its `ThemeBg` union is selection/message/tool backgrounds only, `theme.ts:154-160`). **Verified safe to compose:** `theme.fg` and `highlightCode` emit `\x1b[39m` (fg-only reset, `theme.ts:354`) — never `\x1b[0m` — so a row-level background survives intra-line syntax colors.
+   - The tint intensity encodes **stored patch age**: additions run light-green → saturated green, deletions light-pink → saturated red; the newest contributing patch is fully saturated.
+   - For the distinct patches attributed to the current diff, `t = (patch.created_at - oldest.created_at) / (newest.created_at - oldest.created_at)`. Equal timestamps fall back to stable `(created_at, seq)` order. A single contributing patch has `t = 1`; external changes are newest. The value depends only on persisted source history, never TUI start time, navigation time, or animation phase.
    - Color = `lerpRgb(lightEndpoint, fullEndpoint, t)` per theme variant — dark theme endpoints keep background lightness low enough that hljs foreground colors stay readable (e.g. adds `#1c2e1c → #145214`, dels `#331f24 → #67161f`); light theme uses literal light-green→green (`#e6f7e6 → #7ddc7d`) and light-pink→red (`#fdeef0 → #f5919e`). Endpoints are constants in `render/ansi.ts`, quantized to the 256-color cube when truecolor is unavailable.
    - The diff pane header shows a legend: `old ░▒▓█ new`.
    - Gradient applies to syntax mode only; native mode is pi's verbatim `renderDiff` (uniform colors by design). `t` key cycles tint: `gradient → uniform → off`.
@@ -432,7 +432,7 @@ Unknown input sequences parse to *no* event (dropped explicitly), so `update` ne
 
 **Native mode** (`d` toggles): `renderDiff(displayDiff, {filePath})` verbatim — pixel-identical to pi's chat rendering, including intra-line word-diff inverse. Cumulative native view feeds `generateDiffString(baseline, current).diff` into it; Git per-commit history feeds the source adapter's stored per-file display diff.
 
-**History view** (`H` toggles): session patches form one global `seq`-ordered stream across files. Landing via `n`, `p`, or `f` selects the patch's file, replays that file from its checked baseline through the selected patch, and renders the complete syntax-highlighted post-patch file under `patch 3/7 · full file after edit · 14:02:31`. The cursor lands at `first_changed_line` and scrolls it into the upper third of the viewport. Lines added or replaced by that patch, or the surviving anchor line for a pure deletion, receive a six-frame theme-aware green fade at 120 ms per frame. Replay failure renders an explicit chain-break message; it never substitutes the isolated patch or a guessed partial file. Git per-commit history remains an isolated native diff.
+**History view** (`H` toggles): session patches form one global `seq`-ordered stream across files. Landing via `n`, `p`, or `f` selects the patch's file, replays that file from its checked baseline through the selected patch, and renders the complete syntax-highlighted post-patch file under `patch 3/7 · full file after edit · 14:02:31`. The cursor lands at `first_changed_line` and scrolls it into the upper third of the viewport. Every replay-attributed line receives the same persisted-age gradient as cumulative syntax mode. Historical navigation and reopening do not animate or change tint. Only a new tail patch received during active follow mode applies a six-frame theme-aware green pulse at 120 ms per frame to lines added or replaced by that patch, or the surviving anchor line for a pure deletion; the stable age tint remains after the pulse. Replay failure renders an explicit chain-break message; it never substitutes the isolated patch or a guessed partial file. Git per-commit history remains an isolated native diff.
 
 **Caches** (all keyed by checked identities/content hashes, sha256 computed once per read): highlighted-lines LRU (~20 versions ≈ current+baseline per file), diff model per `(baselineHash, currentHash)`, native `renderDiff` output per source entry, full-file patch snapshots by patch-array identity/baseline/patch id with incremental replay, and visual row maps by selected version and width. Composition of the ~50 visible rows happens per frame, uncached — string concat of pre-rendered pieces, well under a millisecond; pi-tui coalesces renders to ~60 fps and wraps frames in synchronized-output (`\x1b[?2026`, `tui.ts:1286-1308`), so the app stays flicker-free.
 
@@ -452,7 +452,7 @@ Unknown input sequences parse to *no* event (dropped explicitly), so `update` ne
 | `{` / `}` | prev / next hunk | `d` | syntax ⇄ native render mode |
 | `n` / `p` | prev / next patch (history) | `t` | tint cycle: gradient → uniform → off |
 | `enter` | tree → focus diff | `r` | refresh |
-| `q` | quit (Esc unwinds modes first) | `?` | help overlay |
+| `q` | quit (Esc unwinds modes first) | `?` | key-binding overlay |
 
 **Mouse** (`mouse.ts`): registered via `tui.addInputListener` (runs before focus dispatch, `tui.ts:649`); pi-tui's `StdinBuffer` already reassembles split SGR sequences into whole chunks (`stdin-buffer.ts:102-120`), so matching `^\x1b\[<(\d+);(\d+);(\d+)([Mm])$` per chunk is reliable. Consumed sequences never reach focused components.
 - The embedded component enables SGR button-motion and coordinate reporting on entry (`1002` + `1006`) and disables exactly those modes on disposal. It does not assume pi or Ghostty has already enabled mouse reporting, and it never changes raw mode, alternate-screen state, or the keyboard protocol.
@@ -538,7 +538,7 @@ Expect `write` (seq 1, file row with `baseline_missing=1`) then `edit` (seq 2); 
 
 **Phase 5 — embedded integration and polish.** `/patches` reports the current id and `/patches connect <id-or-prefix>` opens the reusable component through `ctx.ui.custom()`. Component disposal clears only owned timers/watchers/listeners; `q` restores pi's editor/footer. Prove no terminal-launch commands or `/review` registration exist. Help overlay complete; standalone `pi-review --list` remains compatible; README reflects the embedded default.
 
-**Phase 6 — patch landings.** Build a checked multi-patch fixture whose second patch changes a non-adjacent line. `n`/`p`/`f` must select the global patch's file, render every line of that file at the selected post-state, place the cursor at `first_changed_line`, and keep earlier patch effects visible. The raw frame must apply the phase-zero landing background to touched lines only; six timer ticks remove it without changing selection or scroll. Boundary navigation must not restart the animation. Repeat with a cross-file append while following, a pure deletion, dark/light themes, ANSI-256 fallback, long wrapped lines, and an injected hash-chain break. The broken chain must say that the snapshot is unavailable and must not render an isolated patch as though it were the file.
+**Phase 6 — patch landings.** Build a checked multi-patch fixture whose second patch changes a non-adjacent line. `n`/`p`/`f` must select the global patch's file, render every line of that file at the selected post-state, place the cursor at `first_changed_line`, and keep earlier patch effects visible. Give three contributing patches uneven persisted timestamps and prove tint ranks `0`, `0.25`, and `1`; opening the TUI, historical navigation, and arbitrary animation ticks must not change them. While actively following, append a new cross-file tail patch: only that event creates the phase-zero landing pulse on touched lines, and six timer ticks reveal the stable age tint without changing selection or scroll. Repeat with a pure deletion, dark/light themes, ANSI-256 fallback, long wrapped lines, and an injected hash-chain break. The broken chain must say that the snapshot is unavailable and must not render an isolated patch as though it were the file. The normal status bar must expose `? keys`, and `?` must open the complete key-binding overlay from every main tab.
 
 ---
 
@@ -891,11 +891,13 @@ Manual patch or file navigation disables following. Git per-commit history keeps
 its source-local commit navigation and does not claim to follow live patches.
 The title exposes global patch position and whether follow mode is active. Every
 session landing shows the complete file as it existed after that patch,
-positions the viewport around the first changed line, and briefly fades a green
-background over only the lines touched by the landed patch. Snapshot replay,
-syntax highlighting, and visual
-mapping are cached; a chain break is an explicit unavailable state rather than a
-partial rendering. Git per-commit mode continues to show the isolated commit diff.
+positions the viewport around the first changed line, and applies a stable tint
+derived from persisted timestamps across all contributing patches. A genuinely
+new tail patch received while following briefly pulses its touched lines; merely
+opening or navigating the TUI never does. Snapshot replay, syntax highlighting,
+and visual mapping are cached; a chain break is an explicit unavailable state
+rather than a partial rendering. Git per-commit mode continues to show the
+isolated commit diff.
 
 File rows render addition and deletion counts as separate change surfaces:
 non-zero `+N` uses the add background and non-zero `-N` uses the delete

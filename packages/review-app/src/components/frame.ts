@@ -62,7 +62,9 @@ export function renderFrame(state: AppState, width: number, height: number): str
           showProvenance,
           wrapLines: state.wrapLines,
           visualMap: currentDiffVisualMap(state, width, height),
-          landingPhase: state.patchLanding?.phase ?? null
+          patchLanding: state.patchLanding === null
+            ? null
+            : { patchId: Number(state.patchLanding.patchId), phase: state.patchLanding.phase }
         })
       : ["No selected documents."];
 
@@ -225,14 +227,14 @@ function overlayLines(state: AppState, width: number, height: number): string[] 
   if (state.mode.kind !== "overlay") return [];
   if (state.mode.which === "help") {
     return padWindow([
-      "Keys",
+      "Key bindings",
       "j/k or arrows move   ctrl+d/ctrl+u half-page   ctrl+e/ctrl+y scroll",
       "gg/G top/bottom      {/} hunk                  [/ ] file",
       "h/l/tab focus        Enter focus diff           v visual selection",
       "c comment            a annotations              S submit drafts",
       "H history   n/p previous/next patch   f follow latest patch",
       "d native/syntax   w wrap   t tint   r refresh",
-      "I guidelines   ? help   q quit   Esc close",
+      "I guidelines   ? key bindings   q quit   Esc close",
       "Annotations: j/k select, Enter jump, e edit, u re-anchor, x delete"
     ], width, height);
   }

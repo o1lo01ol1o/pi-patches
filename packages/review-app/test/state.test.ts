@@ -27,6 +27,7 @@ import { buildDiffModel } from "../src/render/diff-model.ts";
 import { visualRowRef } from "../src/render/diff-wrap.ts";
 import { displayDiffFromUnified } from "../src/render/dataset-history.ts";
 import { stripAnsi, visibleWidth } from "../src/render/ansi.ts";
+import { patchAgeRanks } from "../src/render/patch-age.ts";
 import { contentHashForCurrent, currentDiffVisualMap, draftForCursor, update, viewportFromSize, type AppState, type FileState } from "../src/state.ts";
 
 test("comment editor save result creates a draft effect", () => {
@@ -236,7 +237,7 @@ test("draftForCursor snaps selections spanning deletions to current-version line
   assert.equal(Number(draft?.anchor.end), 2);
 });
 
-test("history navigation renders the full post-patch file and animates landed lines", () => {
+test("history navigation renders the full post-patch file with persisted age tint", () => {
   initTheme("dark");
   const baseline = "zero\nmiddle\ntail\n";
   const afterFirst = "one\nmiddle\ntail\n";
@@ -268,11 +269,10 @@ test("history navigation renders the full post-patch file and animates landed li
   const next = update(state, { kind: "key", key: "n" });
   assert.equal(next.state.patchIdx, 1);
   assert.equal(Number(next.state.cursorRow), 3);
-  assert.deepEqual(next.state.patchLanding, { patchId: 2, phase: 0 });
-  const animated = update(next.state, { kind: "animationTick" }).state;
-  const clamped = update(animated, { kind: "key", key: "n" });
+  assert.equal(next.state.patchLanding, null);
+  const clamped = update(next.state, { kind: "key", key: "n" });
   assert.equal(clamped.state.patchIdx, 1);
-  assert.deepEqual(clamped.state.patchLanding, { patchId: 2, phase: 1 });
+  assert.equal(clamped.state.patchLanding, null);
 
   const rawFrame = renderFrame(next.state, 100, 10);
   const frame = stripAnsi(rawFrame.join("\n"));
@@ -280,19 +280,50 @@ test("history navigation renders the full post-patch file and animates landed li
   assert.match(frame, /1 │ one/);
   assert.match(frame, /2 │ middle/);
   assert.match(frame, /3 │ final/);
-  assert.match(rawFrame.find((line) => stripAnsi(line).includes("3 │ final")) ?? "", /\x1b\[48;2;47;120;72m/);
-  assert.doesNotMatch(rawFrame.find((line) => stripAnsi(line).includes("2 │ middle")) ?? "", /\x1b\[48;2;47;120;72m/);
+  assert.match(rawFrame.find((line) => stripAnsi(line).includes("1 │ one")) ?? "", /\x1b\[48;2;28;46;28m/);
+  assert.match(rawFrame.find((line) => stripAnsi(line).includes("3 │ final")) ?? "", /\x1b\[48;2;20;82;20m/);
+  assert.doesNotMatch(rawFrame.find((line) => stripAnsi(line).includes("2 │ middle")) ?? "", /\x1b\[48;/);
 
   let settled = next.state;
   for (let phase = 0; phase < 6; phase++) settled = update(settled, { kind: "animationTick" }).state;
-  assert.equal(settled.patchLanding, null);
-  assert.doesNotMatch(renderFrame(settled, 100, 10).join("\n"), /\x1b\[48;2;47;120;72m/);
+  assert.equal(renderFrame(settled, 100, 10).join("\n"), rawFrame.join("\n"));
 
   const previous = update(settled, { kind: "key", key: "p" }).state;
   const previousFrame = stripAnsi(renderFrame(previous, 100, 10).join("\n"));
   assert.match(previousFrame, /patch 1\/2 · full file after edit/);
   assert.match(previousFrame, /3 │ tail/);
   assert.doesNotMatch(previousFrame, /3 │ final/);
+
+  const following = update({ ...state, view: "cumulative" }, { kind: "key", key: "f" }).state;
+  assert.equal(following.patchLanding, null);
+  const afterThird = "one\ncenter\nfinal\n";
+  const appended = update(following, {
+    kind: "dbChanged",
+    snapshot: {
+      files: [makeFile(1, "example.txt", baseline, afterThird)],
+      patches: [
+        ...state.patches,
+        makePatch({
+          id: 3,
+          seq: 3,
+          unifiedPatch: "--- a/example.txt\n+++ b/example.txt\n@@ -1,3 +1,3 @@\n one\n-middle\n+center\n final\n",
+          preHash: hashContent(afterSecond),
+          postHash: hashContent(afterThird),
+          firstChangedLine: 2,
+          createdAt: Date.UTC(2026, 0, 2, 14, 2, 31)
+        })
+      ],
+      annotations: []
+    }
+  }).state;
+  assert.deepEqual(appended.patchLanding, { patchId: 3, phase: 0 });
+  const landedRow = renderFrame(appended, 100, 10).find((line) => stripAnsi(line).includes("2 │ center")) ?? "";
+  assert.match(landedRow, /\x1b\[48;2;47;120;72m/);
+
+  let aged = appended;
+  for (let phase = 0; phase < 6; phase++) aged = update(aged, { kind: "animationTick" }).state;
+  const agedRow = renderFrame(aged, 100, 10).find((line) => stripAnsi(line).includes("2 │ center")) ?? "";
+  assert.match(agedRow, /\x1b\[48;2;20;82;20m/);
 });
 
 test("session patch navigation crosses file boundaries in chronological order", () => {
@@ -341,6 +372,7 @@ test("follow latest advances on refresh and manual navigation disengages it", ()
   assert.equal(state.view, "history");
   assert.equal(state.selectedFile, 1);
   assert.equal(state.followLatestPatch, true);
+  assert.equal(state.patchLanding, null);
   assert.match(stripAnsi(renderFrame(state, 100, 8).join("\n")), /patch 2\/2 · following/);
 
   const refreshed = update(state, {
@@ -362,6 +394,7 @@ test("follow latest advances on refresh and manual navigation disengages it", ()
   assert.equal(refreshed.selectedFile, 0);
   assert.equal(refreshed.patchIdx, 1);
   assert.equal(refreshed.followLatestPatch, true);
+  assert.deepEqual(refreshed.patchLanding, { patchId: 3, phase: 0 });
   assert.match(stripAnsi(renderFrame(refreshed, 100, 8).join("\n")), /patch 3\/3 · following/);
 
   const compact = update(refreshed, { kind: "resize", cols: 80, rows: 4 }).state;
@@ -433,6 +466,22 @@ test("file tree independently tints addition and deletion counts", () => {
   assert.match(selected, /^\x1b\[48;2;58;58;74m/);
   assert.doesNotMatch(selected, /48;2;20;82;20|48;2;103;22;31/);
   assert.equal(visibleWidth(selected), 24);
+});
+
+test("patch tint rank uses persisted patch age rather than UI lifetime", () => {
+  const patches = [
+    makePatch({ id: 1, seq: 1, createdAt: 1_000 }),
+    makePatch({ id: 2, seq: 2, createdAt: 1_250 }),
+    makePatch({ id: 3, seq: 3, createdAt: 2_000 })
+  ];
+  const ranks = patchAgeRanks(patches, patches.map((patch) => ({ kind: "patch" as const, seq: patch.seq })));
+  assert.equal(ranks.get("patch:1"), 0);
+  assert.equal(ranks.get("patch:2"), 0.25);
+  assert.equal(ranks.get("patch:3"), 1);
+  assert.deepEqual(
+    patchAgeRanks([patches[1]], [{ kind: "patch", seq: patches[1].seq }]),
+    new Map([["patch:2", 1]])
+  );
 });
 
 test("per-commit dataset history renders commit identity and native per-file diffs", () => {
@@ -908,7 +957,7 @@ test("syntax diff falls back to uniform most-recent tint on patch chain breaks",
   assert.match(stripAnsi(frame), /\+ +1 │ one/);
 });
 
-test("syntax header shows the recency tint legend", () => {
+test("syntax header shows the patch-age tint legend", () => {
   const tinted = stripAnsi(renderFrame(fixtureState(), 100, 8).join("\n"));
   assert.match(tinted, /wrap · cumulative · syntax · tint:gradient old ░▒▓█ new/);
   assert.match(tinted, /File: \/tmp\/example\.txt/);
@@ -1007,11 +1056,18 @@ test("annotation overlay windows long lists around the selected annotation", () 
 test("help overlay documents navigation, annotations, rendering, and refresh keys", () => {
   const state = fixtureState({ mode: { kind: "overlay", which: "help" } });
   const frame = stripAnsi(renderFrame(state, 120, 12).join("\n"));
+  assert.match(frame, /^Key bindings/m);
   assert.match(frame, /ctrl\+d\/ctrl\+u half-page/);
   assert.match(frame, /Annotations: j\/k select, Enter jump, e edit, u re-anchor, x delete/);
   assert.match(frame, /H history\s+n\/p previous\/next patch\s+f follow latest patch/);
   assert.match(frame, /d native\/syntax\s+w wrap\s+t tint\s+r refresh/);
-  assert.match(frame, /I guidelines\s+\? help\s+q quit/);
+  assert.match(frame, /I guidelines\s+\? key bindings\s+q quit/);
+});
+
+test("status bar makes the key binding command discoverable", () => {
+  assert.match(stripAnsi(renderFrame(fixtureState(), 100, 8).at(-1) ?? ""), /\| \? keys/);
+  const opened = update(fixtureState(), { kind: "key", key: "?" }).state;
+  assert.deepEqual(opened.mode, { kind: "overlay", which: "help" });
 });
 
 test("diff pane marks stale annotation ranges with a warning marker", () => {

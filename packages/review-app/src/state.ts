@@ -375,8 +375,10 @@ export function update(state: AppState, event: AppEvent): { state: AppState; eff
 }
 
 function applyDbSnapshot(state: AppState, snapshot: DbSnapshot): { state: AppState; effects: Effect[] } {
-  const previousTail = patchTimeline(state.patches).ordered.at(-1)?.id;
-  const nextTail = patchTimeline(snapshot.patches).ordered.at(-1)?.id;
+  const previousTimeline = patchTimeline(state.patches);
+  const nextTimeline = patchTimeline(snapshot.patches);
+  const previousTail = previousTimeline.ordered.at(-1)?.id;
+  const nextTail = nextTimeline.ordered.at(-1)?.id;
   const replaced = {
     ...state,
     files: snapshot.files,
@@ -386,8 +388,9 @@ function applyDbSnapshot(state: AppState, snapshot: DbSnapshot): { state: AppSta
     annotationCursor: Math.min(state.annotationCursor, Math.max(0, snapshot.annotations.length - 1)),
     mode: state.mode.kind === "comment" ? { kind: "normal" } as const : state.mode
   };
-  const followed = state.followLatestPatch && previousTail !== nextTail
-    ? selectLatestSessionPatch(replaced, true)
+  const tailAdvanced = nextTimeline.ordered.length > previousTimeline.ordered.length && previousTail !== nextTail;
+  const followed = state.followLatestPatch && tailAdvanced
+    ? selectLatestSessionPatch(replaced, true, true)
     : replaced;
   return {
     state: clampScroll(followed),
@@ -883,7 +886,7 @@ function selectPatch(state: AppState, delta: number): { state: AppState; effects
     const current = position?.index ?? (delta > 0 ? -1 : timeline.ordered.length);
     const target = clamp(current + delta, 0, timeline.ordered.length - 1);
     if (position !== null && target === current) return { state, effects: [] };
-    return { state: selectSessionPatchAt(state, target, false), effects: [] };
+    return { state: selectSessionPatchAt(state, target, false, false), effects: [] };
   }
   const count = historyCountForFile(state, file.row.id);
   if (count === 0) return { state, effects: [] };
@@ -903,23 +906,24 @@ function followLatestPatch(state: AppState): { state: AppState; effects: Effect[
   if (state.dataset.source.kind !== "session" || state.historyEntries.length > 0) {
     return { state: { ...state, statusMessage: "Follow latest is available for session patches" }, effects: [] };
   }
-  return { state: selectLatestSessionPatch({ ...state, view: "history" }, true), effects: [] };
+  return { state: selectLatestSessionPatch({ ...state, view: "history" }, true, false), effects: [] };
 }
 
-function selectLatestSessionPatch(state: AppState, following: boolean): AppState {
+function selectLatestSessionPatch(state: AppState, following: boolean, animate: boolean): AppState {
   const timeline = patchTimeline(state.patches);
   if (timeline.ordered.length === 0) {
     return {
       ...state,
       view: "history",
       followLatestPatch: following,
+      patchLanding: null,
       statusMessage: following ? "Following latest patch; waiting for the first patch" : state.statusMessage
     };
   }
-  return selectSessionPatchAt(state, timeline.ordered.length - 1, following);
+  return selectSessionPatchAt(state, timeline.ordered.length - 1, following, animate);
 }
 
-function selectSessionPatchAt(state: AppState, index: number, following: boolean): AppState {
+function selectSessionPatchAt(state: AppState, index: number, following: boolean, animate: boolean): AppState {
   const timeline = patchTimeline(state.patches);
   const targetIndex = clamp(index, 0, Math.max(0, timeline.ordered.length - 1));
   const patch = timeline.ordered[targetIndex];
@@ -937,7 +941,7 @@ function selectSessionPatchAt(state: AppState, index: number, following: boolean
     view: "history",
     patchIdx,
     followLatestPatch: following,
-    patchLanding: { patchId: patch.id, phase: 0 },
+    patchLanding: animate ? { patchId: patch.id, phase: 0 } : null,
     cursorRow: diffRow(0),
     selection: null,
     scrollTop: {

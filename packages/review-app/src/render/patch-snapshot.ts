@@ -1,6 +1,8 @@
 import { parsePatch } from "diff";
 import { errorMessage, type PatchRecord } from "@pi-patches/store";
 import { createBlameCache } from "./blame.ts";
+import type { Attribution } from "./diff-model.ts";
+import { patchAgeRanks } from "./patch-age.ts";
 import type { FileState } from "../state.ts";
 
 const replayCache = createBlameCache(100);
@@ -14,6 +16,8 @@ export type PatchFileSnapshot = {
   content: string;
   hash: string;
   lines: string[];
+  lineAttributions: readonly (Attribution | undefined)[];
+  ageRanks: ReadonlyMap<string, number>;
   landingLine: number;
   changedLines: ReadonlySet<number>;
 };
@@ -37,10 +41,11 @@ export function buildPatchFileSnapshot(
   const cached = snapshotCache.get(patches)?.get(cacheKey);
   if (cached) return cached;
 
+  const selectedPatches = filePatches.slice(0, index + 1);
   const replayed = replayCache.replay(
     `${file.row.sessionId}:${Number(file.row.id)}`,
     file.row.baseline,
-    filePatches.slice(0, index + 1)
+    selectedPatches
   );
   if (!replayed.ok) {
     return cacheSnapshot(patches, cacheKey, {
@@ -49,6 +54,7 @@ export function buildPatchFileSnapshot(
     });
   }
   const lines = splitLines(replayed.value.content);
+  const lineAttributions = replayed.value.lines.map((line) => line.attribution);
   const changedLines = changedCurrentLines(selected, lines.length);
   const firstChanged = selected.firstChangedLine ?? changedLines.values().next().value ?? 1;
   const landingLine = lines.length === 0 ? 0 : clamp(firstChanged, 1, lines.length);
@@ -61,6 +67,8 @@ export function buildPatchFileSnapshot(
       content: replayed.value.content,
       hash: replayed.value.hash,
       lines,
+      lineAttributions,
+      ageRanks: patchAgeRanks(selectedPatches, lineAttributions),
       landingLine,
       changedLines
     }

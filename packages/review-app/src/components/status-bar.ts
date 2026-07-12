@@ -4,7 +4,7 @@ export function renderStatusBar(state: AppState): string {
   const message = state.statusMessage ? ` | ${state.statusMessage}` : "";
   const pending = state.pendingKey ? ` | pending ${state.pendingKey}` : "";
   const counts = annotationCounts(state);
-  return `${counts.draft} drafts | ${counts.queued} queued | ${counts.sent} sent | ${state.activeTab} | ${state.mode.kind}${pending}${message}`;
+  return `${counts.draft} drafts | ${counts.queued} queued | ${counts.sent} sent | ${state.activeTab} | ${state.mode.kind} | ? keys${pending}${message}`;
 }
 
 function annotationCounts(state: AppState): { draft: number; queued: number; sent: number } {

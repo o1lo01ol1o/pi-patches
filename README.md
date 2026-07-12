@@ -204,7 +204,7 @@ w                toggle line wrapping
 t                gradient/uniform/off tint mode
 r                refresh
 I                review guidelines overlay
-?                help
+?                key bindings
 q                finish or quit
 ```
 
@@ -214,16 +214,21 @@ history, jumps to the newest patch, and follows patches appended by the connecte
 session. Manual patch or file navigation disables following. Annotation-only
 refreshes preserve the current cursor and scroll instead of forcing a tail jump.
 Each landing replays the selected file through that patch and shows the complete
-post-patch file, with the cursor positioned at the first changed line. Lines
-touched by the landed patch briefly fade from a theme-aware green background;
-unchanged lines remain untinted. A broken replay chain is reported explicitly
-instead of displaying a partial or guessed file. Snapshots, syntax highlighting,
-and visual row maps are cached, so animation frames compose only the visible rows.
+post-patch file, with the cursor positioned at the first changed line. Every
+replay-attributed line keeps a theme-aware green tint based on the stored age of
+all contributing patches: oldest is lightest, newest is most saturated, and
+intermediate intensity is interpolated from persisted patch timestamps. Opening
+the TUI or browsing with `n`/`p` does not reset those colors. Only a genuinely
+new patch appended while `f` is following receives the brief just-landed pulse,
+after which its stable age tint remains. A broken replay chain is reported
+explicitly instead of displaying a partial or guessed file. Snapshots, syntax
+highlighting, and visual row maps are cached, so animation frames compose only
+the visible rows.
 For per-commit Git sources, `n`/`p` browse the selected file's commit history and
 retain native per-commit diffs; `f` is unavailable.
 
 Syntax mode highlights source code and, for session cumulative diffs, attributes
-lines to patch recency. Tint mode cycles between a recency gradient, a uniform
+lines to persisted patch age. Tint mode cycles between an age gradient, a uniform
 change background, and no background. The selected file is highlighted across
 the full tree width. Other file rows apply the active tint mode independently to
 non-zero green `+N` and red `-N` counters, so a modified file can display both
@@ -239,6 +244,9 @@ Useful markers:
 ∅   tracked file missing from disk
 ↳   wrapped continuation of the preceding logical diff row
 ```
+
+The status bar always shows `? keys`; press `?` from any main tab to open the
+complete key-binding overlay. Press `?`, `Esc`, or `q` to close it.
 
 Diffs, notes, guidelines, analysis output, and annotation lists wrap by default.
 Wrapping prefers word boundaries, hard-wraps an oversized token, preserves ANSI
