@@ -13,7 +13,7 @@ Five cooperating components:
 1. **Recorder extension** — a pi extension (in-process, TypeScript, jiti-loaded) that records every file mutation made by pi's `edit` and `write` tools into a per-project SQLite database, including a **baseline** (first-touch content) per file so the session's cumulative diff can always be reconstructed.
 2. **Embedded review component** — an `@earendil-works/pi-tui` component opened inside pi with `/patches connect <session-id-or-prefix>`. It temporarily replaces pi's editor, reserves pi's footer rows, and returns to pi on `q`; it never launches another terminal or owns/stops pi's `TUI`.
 3. **Annotation round-trip** — line-range comments created in the review app persist in an annotation queue in the same database; on explicit submit, the recorder extension claims the queued batch and delivers it to the model via `pi.sendUserMessage(...)` — i.e., exactly as if the user had typed it into pi.
-4. **Review-source adapters (v2)** — present session history, working-tree changes, branch/commit/range changes, pull requests, and folder snapshots through one checked `ReviewDataset` boundary rather than teaching the renderer about Git or GitHub.
+4. **Review-source adapters (v2)** — present session history, complete/staged/unstaged worktree changes, branch/commit/range changes, pull requests, and folder snapshots through one checked `ReviewDataset` boundary rather than teaching the renderer about Git or GitHub.
 5. **Model analysis (v2)** — runs one of two explicitly selected tasks with a selected configured model: a descriptive **change narrative**, optionally preserving per-commit evolution, or a defect-oriented **implementation review**. These are separate requests, prompts, outputs, and persisted runs.
 
 ### Decisions (locked)
@@ -26,6 +26,7 @@ Five cooperating components:
 | TUI stack | TypeScript on `@earendil-works/pi-tui@0.80.2`, reusing pi's exported diff renderer and highlight.js pipeline |
 | Pi command namespace | `/patches` only. `/review` is not registered. `/patches` reports the current id; `/patches connect <id-or-prefix>` opens the embedded TUI. |
 | Terminal ownership | Embedded review reuses pi's live `TUI`; it never spawns a process or terminal window. The standalone CLI owns terminal modes only when invoked directly. |
+| Source switching | `s` changes the open component between session-patch and Git-derived datasets; it does not close the TUI or mutate Git/session state. |
 | Model-assisted tasks | `narrative` and `implementationReview` are disjoint modes. A narrative is not a softer review, and a review is not a narrative with findings appended. |
 | Model selection | Every model-assisted run records an explicit provider/model selection; the current pi model is only the initial default. |
 
@@ -320,7 +321,11 @@ Crash-window semantics: rows are marked `sent` inside the claim transaction, *be
 
 - **`/patches`** — report the current session id, recorder counts, and `Open review: /patches connect <session-id>`.
 - **`/patches connect <session-id-or-prefix>`** — resolve the session inside the current project's patch DB, open an independent read/write store connection, load `AppState`, and pass `createReviewComponent(...)` to `ctx.ui.custom()`. `q` calls the custom UI's `done`; component disposal clears timers/watchers/overlays, and the command closes only its independent DB connection. It must not stop pi's shared `TUI`.
-- **`/patches inspect [source...]`** (v2) — open the source selector when no source arguments are supplied, or directly materialize a checked non-session source (§10.4). This remains distinct from `connect`, whose argument is always a recorded pi session id/prefix.
+- **`/patches inspect [source...]`** (v2) — open the source selector when no
+  source arguments are supplied, or directly materialize any checked source
+  (`session`, `working-tree`, `staged`, `unstaged`, `branch`, `commit`, `range`,
+  `pr`, or `snapshot`; §10.4). This remains distinct from `connect`, whose
+  argument is always a recorded pi session id/prefix.
 - **`/patches analyze`** (v2) — from an open dataset, choose model and exactly one analysis mode (`narrative` or `implementationReview`) and show the persisted result in the terminal interface (§10.6). Direct non-interactive argument forms may be added, but the TUI selector is the owning interaction.
 
 The extension never registers `/review` and never launches another process or terminal window.
@@ -589,6 +594,10 @@ workflow. Reference inspected: `earendil-works/pi-review` commit
    to the exact visible row, line clicks preserve diff coordinates under scroll,
    and drag selection remains usable. Every mouse mode enabled by the component is
    disabled when it returns to pi.
+8. **Sources switch in place.** The open component can move between session-patch
+   datasets and Git-derived datasets without quitting to pi, opening another
+   terminal, or losing the previously selected source. Source selection never
+   mutates the index, worktree, refs, or recorded session.
 
 ### 10.2 Findings, callouts, and verdict
 
@@ -649,6 +658,8 @@ records:
 type ReviewSource =
   | { kind: "session"; sessionId: SessionId }
   | { kind: "workingTree"; base: "HEAD" }
+  | { kind: "staged"; base: "HEAD"; head: "INDEX" }
+  | { kind: "unstaged"; base: "INDEX"; head: "WORKTREE" }
   | { kind: "branch"; baseRef: string; headRef: string }
   | { kind: "commit"; sha: string }
   | { kind: "commitRange"; baseExclusive: string; headInclusive: string }
@@ -685,14 +696,21 @@ type ReviewDataset = {
 
 `HistoryMode.perCommit` is accepted only for sources with a non-empty Git commit
 sequence (`branch`, `commitRange`, and pull requests; a single `commit` is a
-one-element sequence). `workingTree`, `snapshot`, and session patch history use
-their native history views and cannot masquerade as Git commits.
+one-element sequence). `workingTree`, `staged`, `unstaged`, `snapshot`, and
+session patch history use their native history views and cannot masquerade as Git
+commits.
 
 Adapters live at effect boundaries:
 
 - **Session:** existing SQLite baseline/current/patch chain and exact attribution.
-- **Working tree:** staged, unstaged, deleted, renamed, and untracked files against
-  `HEAD`; binary/submodule entries are explicit non-text documents, never dropped.
+- **Working tree:** the complete `HEAD → WORKTREE` change, including staged,
+  unstaged, deleted, renamed, and untracked files.
+- **Staged:** the exact `HEAD → INDEX` change. Worktree-only edits must not leak
+  into this source.
+- **Unstaged:** the exact `INDEX → WORKTREE` change, with untracked files treated
+  as empty-baseline additions. Index-only changes must not leak into this source.
+  For every Git worktree source, binary/submodule entries are explicit non-text
+  documents rather than silently dropped.
 - **Branch/range/commit:** resolve refs once, pin SHAs, enumerate status/renames,
   and read both sides with Git plumbing commands. `perCommit` retains ordered
   commit metadata and each commit's diff in addition to the net baseline/head.
@@ -711,9 +729,21 @@ fingerprint.
 
 ### 10.5 Source selector, guidelines, and focus
 
-`/patches inspect` opens a searchable source selector. The stable preset order is
-session, working tree, base branch, commit/range, pull request, and snapshot.
-Smart preselection does not reorder it:
+`/patches inspect` opens a searchable source selector before the component is
+created. While the component is open, `s` opens the same selector as an embedded
+overlay and switches the dataset in place. The selector distinguishes two diff
+source families, plus the auxiliary snapshot source:
+
+- **Session patches:** the connected session first, followed by other recorded
+  sessions. These views derive their bytes and attribution from persisted patch
+  chains rather than Git.
+- **Git diffs:** complete working tree, staged only, unstaged only, base branch,
+  commit, range, and pull request.
+- **Snapshot:** current path contents without session attribution or a Git diff.
+
+The stable preset order is session patches, complete working tree, staged,
+unstaged, base branch, commit/range, pull request, and snapshot. Smart
+preselection does not reorder it:
 
 1. current connected session when it has patches;
 2. working tree when it has changes;
@@ -724,6 +754,35 @@ Branch and commit pickers support fuzzy filtering; default branch is labeled and
 sorted first, current branch is not offered as its own base, and commit entries
 show short SHA plus subject. Direct arguments and selector results pass through
 the same total parser/validator.
+
+The selector remembers the active and immediately previous source descriptors.
+After both diff families have been visited, opening it from a session source
+initially highlights the previous Git source, and opening it from a Git source
+initially highlights the previous session source. Consequently `s` then `Enter`
+is the fast toggle between the two source families, while navigation within the
+selector chooses a different Git mode or session. The current source family,
+precise descriptor, history mode, and pinned identity are always visible in the
+component header; labels such as `staged` and `unstaged` must not collapse to the
+ambiguous `working tree` label.
+
+Source materialization occurs behind an explicit loading mode while the current
+dataset remains renderable. Success atomically replaces the dataset, source-bound
+files, history, annotations, analysis runs, cursors, scroll positions, watchers,
+and session follow state. It preserves presentation preferences that are valid
+across sources: wrap mode, tint mode, syntax/native rendering, and pane geometry.
+The new source opens on its first changed file; a session source may instead land
+at its followed/latest patch when that descriptor's saved state requested it.
+Unsaved finding edits must be saved to the old fingerprint, explicitly discarded,
+or cancel the switch before replacement. Persisted drafts remain attached to the
+old fingerprint; no finding is transferred to another source.
+
+Cancellation or materialization failure closes the selector/loading mode and
+leaves the prior dataset byte-for-byte active, with a visible error. Re-selecting
+an unchanged pinned descriptor may reuse its checked cached dataset and saved
+navigation state. Cache eviction is bounded, and switching never requires all
+candidate diffs to reside in memory simultaneously. A refresh re-materializes
+only the active source according to its own boundary (`HEAD → INDEX`,
+`INDEX → WORKTREE`, and so on).
 
 The project boundary loader walks upward from cwd to the directory owning `.pi`.
 If `REVIEW_GUIDELINES.md` exists beside that `.pi` directory, its non-empty
@@ -860,6 +919,11 @@ cancellation states are explicit modes in the reducer; only one analysis run may
 own a component at a time, while completed runs remain browseable by timestamp,
 model, source fingerprint, and mode.
 
+`s` opens the source selector from every non-modal view and appears in the key
+bindings overlay. Switching sources is unavailable only while another modal owns
+input or an analysis request is actively running; cancellation returns control to
+the unchanged source.
+
 The selected file's absolute `FileRecord.path` occupies a dedicated sticky header
 row with the full terminal width available to it. It remains fixed while either
 pane scrolls. The corresponding file row uses the theme-aware selection
@@ -930,6 +994,13 @@ untracked/deleted/renamed files, merge bases, a single commit, ranges with rever
 merge commits, binary/submodule entries, and snapshots. Adapter output is checked
 against independent Git plumbing commands. PR tests prove the active worktree HEAD
 and index are unchanged. Fuzzy selectors and smart preselection are pure tests.
+Reducer/component tests switch session → staged → unstaged → branch → session
+without closing the component; prove `s` then `Enter` selects the prior source
+family; and prove atomic rollback on cancellation, adapter failure, and rejected
+draft handling. Fixture tests distinguish `HEAD → INDEX`, `INDEX → WORKTREE`, and
+`HEAD → WORKTREE`, including a path changed differently in both index and
+worktree. Cache tests bound retained datasets and show that a large inactive diff
+is not kept alive solely because it appeared in the selector.
 
 **Phase 8 — selected-model analysis.** Deterministic fake-model tests prove the
 selected provider/model/thinking level reaches the runner without changing pi's
@@ -956,8 +1027,10 @@ the diff is scrolled and require the selected file highlight to fill the tree
 track without changing total frame width.
 
 **Phase 10 — live acceptance.** In a real isolated pi TTY: inspect a recorded
-session, working tree, branch range, and non-destructive PR source; create
-prioritized agent findings and human callouts; exercise each finish action; run
-both analysis modes with an explicitly selected model; verify persisted model/
-prompt/source/coverage metadata; press `q` and confirm pi's editor/footer/terminal
-are restored with no child process or worktree mutation.
+session, then use `s` without leaving the component to switch through staged,
+unstaged, complete working tree, branch range, and back to the session; inspect a
+non-destructive PR source; create prioritized agent findings and human callouts;
+exercise each finish action; run both analysis modes with an explicitly selected
+model; verify persisted model/prompt/source/coverage metadata; press `q` and
+confirm pi's editor/footer/terminal are restored with no child process, new
+terminal, index mutation, ref movement, or worktree mutation.
