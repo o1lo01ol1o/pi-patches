@@ -72,6 +72,17 @@ test("cached large-diff rendering composes only the requested viewport", (contex
   const cachedMs = performance.now() - cachedStart;
   context.diagnostic(`large diff cached-200=${cachedMs.toFixed(1)}ms`);
   assert.ok(cachedMs < 2_000, `cached large-diff rendering took ${cachedMs.toFixed(1)}ms`);
+
+  const expandedOptions = { ...options, expanded: true };
+  renderDiffPane(file, [], [], expandedOptions);
+  const expandedStart = performance.now();
+  for (let index = 0; index < 200; index++) {
+    const lines = renderDiffPane(file, [], [], { ...expandedOptions, startRow: index * 17 });
+    assert.ok(lines.length <= options.height);
+  }
+  const expandedMs = performance.now() - expandedStart;
+  context.diagnostic(`full-file diff cached-200=${expandedMs.toFixed(1)}ms`);
+  assert.ok(expandedMs < 2_000, `cached full-file rendering took ${expandedMs.toFixed(1)}ms`);
 });
 
 function fileState(index: number): FileState {

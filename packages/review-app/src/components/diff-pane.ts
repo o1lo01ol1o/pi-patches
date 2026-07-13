@@ -46,6 +46,7 @@ export type DiffPaneOptions = {
   width: number;
   selectedRange: { start: number; end: number } | null;
   showProvenance: boolean;
+  expanded?: boolean;
   wrapLines?: boolean;
   visualMap?: DiffVisualMap;
   patchLanding?: { patchId: number; phase: number } | null;
@@ -53,7 +54,7 @@ export type DiffPaneOptions = {
 
 export type DiffPaneVisualOptions = Pick<
   DiffPaneOptions,
-  "view" | "renderMode" | "patchIdx" | "historyEntry" | "width" | "showProvenance" | "wrapLines"
+  "view" | "renderMode" | "patchIdx" | "historyEntry" | "width" | "showProvenance" | "expanded" | "wrapLines"
 >;
 
 const syntaxHunkPrefixWidth = 9;
@@ -74,8 +75,9 @@ export function renderDiffPane(
       : renderPatchSnapshotPane(file, patches, { ...options, visualMap });
   }
   if (options.renderMode === "native") {
-    const key = `cumulative:${file.row.path}:${baselineHash(file)}:${file.currentHash}`;
-    return renderNativeVisualRows(nativeLogicalLines(key, cumulativeDisplayDiff(file), file.row.path), { ...options, visualMap });
+    const context = options.expanded ? "full" : "patches";
+    const key = `cumulative:${context}:${file.row.path}:${baselineHash(file)}:${file.currentHash}`;
+    return renderNativeVisualRows(nativeLogicalLines(key, cumulativeDisplayDiff(file, options.expanded ?? false), file.row.path), { ...options, visualMap });
   }
   return renderCumulativeSyntax(file, patches, annotations, { ...options, visualMap });
 }
@@ -101,11 +103,12 @@ export function buildDiffPaneVisualMap(
       wrap
     );
   } else if (options.renderMode === "native") {
-    const key = `cumulative:${file.row.path}:${baselineHash(file)}:${file.currentHash}`;
-    const lines = nativeLogicalLines(key, cumulativeDisplayDiff(file), file.row.path);
+    const context = options.expanded ? "full" : "patches";
+    const key = `cumulative:${context}:${file.row.path}:${baselineHash(file)}:${file.currentHash}`;
+    const lines = nativeLogicalLines(key, cumulativeDisplayDiff(file, options.expanded ?? false), file.row.path);
     map = buildDiffVisualMap(lines, () => Math.max(1, options.width - nativePrefixWidth), wrap);
   } else {
-    const model = buildAttributedDiffModel(file, patches, options.showProvenance);
+    const model = buildAttributedDiffModel(file, patches, options.showProvenance, options.expanded ?? false);
     map = buildDiffVisualMap(
       model.rows.map(rowText),
       (index) => Math.max(1, options.width - syntaxPrefixWidth(model.rows[index]?.kind ?? "hunk")),
@@ -122,7 +125,7 @@ function renderCumulativeSyntax(
   annotations: readonly Annotation[],
   options: DiffPaneOptions & { visualMap: DiffVisualMap }
 ): string[] {
-  const model = buildAttributedDiffModel(file, patches, options.showProvenance);
+  const model = buildAttributedDiffModel(file, patches, options.showProvenance, options.expanded ?? false);
   const highlighted = highlightedVersions(file);
   const ranks = attributionRanks(model, patches);
   const segmentCache = new Map<number, string[]>();
@@ -160,6 +163,7 @@ function syntaxContent(
 ): string {
   switch (row.kind) {
     case "hunk":
+    case "collapsed":
       return row.text;
     case "add":
     case "context":
@@ -170,7 +174,7 @@ function syntaxContent(
 }
 
 function syntaxPrefix(row: DiffModelRow, cursor: string, marker: string, continuation: boolean): string {
-  if (row.kind === "hunk") return `${cursor} ${marker}      `;
+  if (row.kind === "hunk" || row.kind === "collapsed") return `${cursor} ${marker}      `;
   if (continuation) return `${cursor} ${marker} ${themedDiffGutter("context", "      │")} `;
   switch (row.kind) {
     case "add":
@@ -183,7 +187,7 @@ function syntaxPrefix(row: DiffModelRow, cursor: string, marker: string, continu
 }
 
 function syntaxPrefixWidth(kind: DiffModelRow["kind"]): number {
-  return kind === "hunk" ? syntaxHunkPrefixWidth : syntaxCodePrefixWidth;
+  return kind === "hunk" || kind === "collapsed" ? syntaxHunkPrefixWidth : syntaxCodePrefixWidth;
 }
 
 function rowText(row: DiffModelRow): string {
@@ -209,6 +213,7 @@ function visualMapKey(
     historyKey,
     options.view,
     options.renderMode,
+    options.expanded ? "full" : "patches",
     options.width,
     wrap ? "wrap" : "nowrap"
   ].join(":");
@@ -241,15 +246,20 @@ function safeHighlight(content: string, language: string | undefined): string[] 
   }
 }
 
-function buildAttributedDiffModel(file: FileState, patches: readonly PatchRecord[], showProvenance: boolean): DiffModel {
+function buildAttributedDiffModel(
+  file: FileState,
+  patches: readonly PatchRecord[],
+  showProvenance: boolean,
+  expanded: boolean
+): DiffModel {
   const baseline = file.row.baseline.kind === "present" ? file.row.baseline.content : "";
   const filePatches = patches.filter((patch) => patch.fileId === file.row.id);
   const lastPatchId = filePatches.at(-1)?.id ?? 0;
-  const cacheKey = `${showProvenance ? "attributed" : "plain"}:${file.row.id}:${baselineHash(file)}:${lastPatchId}:${file.currentHash}`;
+  const cacheKey = `${showProvenance ? "attributed" : "plain"}:${expanded ? "full" : "patches"}:${file.row.id}:${baselineHash(file)}:${lastPatchId}:${file.currentHash}`;
   const cached = lruGet(attributedModelCache, cacheKey);
   if (cached) return cached;
   if (!showProvenance) {
-    const model = buildDiffModel(baseline, file.current ?? "", file.row.relPath);
+    const model = buildDiffModel(baseline, file.current ?? "", file.row.relPath, { context: expanded ? "full" : "patches" });
     lruSet(attributedModelCache, cacheKey, model);
     return model;
   }
@@ -259,7 +269,10 @@ function buildAttributedDiffModel(file: FileState, patches: readonly PatchRecord
       baseline,
       file.current ?? "",
       file.row.relPath,
-      mostRecentAttribution(baseline, file.current ?? "", filePatches)
+      {
+        attribution: mostRecentAttribution(baseline, file.current ?? "", filePatches),
+        context: expanded ? "full" : "patches"
+      }
     );
     lruSet(attributedModelCache, cacheKey, model);
     return model;
@@ -268,8 +281,11 @@ function buildAttributedDiffModel(file: FileState, patches: readonly PatchRecord
     ? replay.value
     : applyExternalChanges(replay.value, file.current ?? "");
   const model = buildDiffModel(baseline, file.current ?? "", file.row.relPath, {
-    currentLines: version.lines,
-    deletedBaselineLines: version.deletedBaselineLines
+    attribution: {
+      currentLines: version.lines,
+      deletedBaselineLines: version.deletedBaselineLines
+    },
+    context: expanded ? "full" : "patches"
   });
   lruSet(attributedModelCache, cacheKey, model);
   return model;
@@ -369,9 +385,15 @@ function snapshotPrefix(lineNumber: number, cursor: string, marker: string, cont
     : `${cursor}${marker} ${String(lineNumber).padStart(5, " ")} │ `;
 }
 
-function cumulativeDisplayDiff(file: FileState): string {
+function cumulativeDisplayDiff(file: FileState, expanded: boolean): string {
   const baseline = file.row.baseline.kind === "present" ? file.row.baseline.content : "";
-  return generateDiffString(baseline, file.current ?? "").diff;
+  const current = file.current ?? "";
+  const contextLines = expanded ? Math.max(splitLines(baseline).length, splitLines(current).length, 1) : undefined;
+  const diff = contextLines === undefined
+    ? generateDiffString(baseline, current).diff
+    : generateDiffString(baseline, current, contextLines).diff;
+  if (diff.length > 0 || !expanded) return diff;
+  return splitLines(current).map((line, index) => ` ${index + 1} ${line}`).join("\n");
 }
 
 function nativeLogicalLines(key: string, diff: string, filePath: string): string[] {

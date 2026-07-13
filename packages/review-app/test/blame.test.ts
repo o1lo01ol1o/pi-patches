@@ -71,8 +71,10 @@ test("replay attribution covers every changed cumulative diff row, including ext
 
   const withExternal = applyExternalChanges(replay.value, current);
   const model = buildDiffModel(baseline, current, "example.txt", {
-    currentLines: withExternal.lines,
-    deletedBaselineLines: withExternal.deletedBaselineLines
+    attribution: {
+      currentLines: withExternal.lines,
+      deletedBaselineLines: withExternal.deletedBaselineLines
+    }
   });
   const changedRows = model.rows.filter((row) => row.kind === "add" || row.kind === "del");
 

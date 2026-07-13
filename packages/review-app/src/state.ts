@@ -60,6 +60,7 @@ export type DatasetHistoryEntry = {
 };
 
 const cumulativeDiffModelCache = new WeakMap<FileState, DiffModel>();
+const expandedDiffModelCache = new WeakMap<FileState, DiffModel>();
 
 type PatchTimeline = {
   ordered: PatchRecord[];
@@ -131,6 +132,7 @@ export type AppState = {
   focusedPane: "tree" | "diff";
   view: "cumulative" | "history";
   renderMode: "syntax" | "native";
+  expandedFiles: ReadonlySet<FileId>;
   wrapLines: boolean;
   tintMode: "gradient" | "uniform" | "off";
   colorDepth: ColorDepth;
@@ -300,8 +302,9 @@ export function update(state: AppState, event: AppEvent): { state: AppState; eff
     case "h":
       return { state: { ...state, pendingKey: null, focusedPane: "tree" }, effects: [] };
     case "l":
-    case "Enter":
       return { state: { ...state, pendingKey: null, focusedPane: "diff" }, effects: [] };
+    case "Enter":
+      return expandCollapsedAtCursor(state) ?? { state: { ...state, pendingKey: null, focusedPane: "diff" }, effects: [] };
     case "H":
       return {
         state: {
@@ -329,6 +332,8 @@ export function update(state: AppState, event: AppEvent): { state: AppState; eff
       };
     case "w":
       return toggleLineWrap(state);
+    case "e":
+      return toggleSelectedFileExpansion(state);
     case "t":
       return { state: { ...state, pendingKey: null, tintMode: nextTintMode(state.tintMode) }, effects: [] };
     case "n":
@@ -676,11 +681,13 @@ function applyDbSnapshot(state: AppState, snapshot: DbSnapshot): { state: AppSta
   const nextTimeline = patchTimeline(snapshot.patches);
   const previousTail = previousTimeline.ordered.at(-1)?.id;
   const nextTail = nextTimeline.ordered.at(-1)?.id;
+  const liveFileIds = new Set(snapshot.files.map((file) => file.row.id));
   const replaced = {
     ...state,
     files: snapshot.files,
     patches: snapshot.patches,
     annotations: snapshot.annotations,
+    expandedFiles: new Set([...state.expandedFiles].filter((id) => liveFileIds.has(id))),
     selectedFile: Math.min(state.selectedFile, Math.max(0, snapshot.files.length - 1)),
     annotationCursor: Math.min(state.annotationCursor, Math.max(0, snapshot.annotations.length - 1)),
     mode: state.mode.kind === "comment" ? { kind: "normal" } as const : state.mode
@@ -828,6 +835,82 @@ function toggleLineWrap(state: AppState): { state: AppState; effects: Effect[] }
     }),
     effects: []
   };
+}
+
+function expandCollapsedAtCursor(state: AppState): { state: AppState; effects: Effect[] } | null {
+  if (state.view !== "cumulative" || state.renderMode !== "syntax" || state.focusedPane !== "diff") return null;
+  const file = state.files[state.selectedFile];
+  if (!file || state.expandedFiles.has(file.row.id)) return null;
+  const row = cumulativeDiffModel(file, false).rows[Number(state.cursorRow)];
+  return row?.kind === "collapsed"
+    ? toggleSelectedFileExpansion(state, true, Number(row.newStart))
+    : null;
+}
+
+function toggleSelectedFileExpansion(
+  state: AppState,
+  force?: boolean,
+  requestedLine?: number
+): { state: AppState; effects: Effect[] } {
+  if (state.view !== "cumulative") {
+    return { state: { ...state, statusMessage: "File expansion is available in cumulative view" }, effects: [] };
+  }
+  const file = state.files[state.selectedFile];
+  if (!file) return { state: { ...state, statusMessage: "No selected file to expand" }, effects: [] };
+  const wasExpanded = state.expandedFiles.has(file.row.id);
+  const expanded = force ?? !wasExpanded;
+  if (expanded === wasExpanded) return { state, effects: [] };
+
+  const previousRows = cumulativeDiffModel(file, wasExpanded).rows;
+  const previousIndex = clamp(Number(state.cursorRow), 0, Math.max(0, previousRows.length - 1));
+  const preferredLine = requestedLine ?? currentCoordinateForRow(previousRows, previousIndex) ?? 1;
+  const expandedFiles = new Set(state.expandedFiles);
+  if (expanded) expandedFiles.add(file.row.id);
+  else expandedFiles.delete(file.row.id);
+
+  const nextRows = cumulativeDiffModel(file, expanded).rows;
+  const cursor = rowForCurrentLine(nextRows, preferredLine);
+  const positioned = {
+    ...state,
+    expandedFiles,
+    focusedPane: "diff" as const,
+    pendingKey: null,
+    cursorRow: diffRow(cursor),
+    selection: null,
+    statusMessage: `${expanded ? "Expanded" : "Collapsed"} ${file.row.relPath} to ${expanded ? "full file" : "patch context"}`
+  };
+  const map = currentDiffVisualMap(positioned);
+  const visualRow = visualStartForLogicalRow(map, cursor);
+  return {
+    state: {
+      ...positioned,
+      scrollTop: {
+        ...positioned.scrollTop,
+        diff: clamp(visualRow - Math.floor(viewportRows(positioned) / 3), 0, Math.max(0, map.visualRowCount - viewportRows(positioned)))
+      }
+    },
+    effects: []
+  };
+}
+
+function currentCoordinateForRow(rows: readonly DiffModelRow[], index: number): number | null {
+  const row = rows[index];
+  if (!row) return null;
+  if (row.kind === "collapsed") return Number(row.newStart);
+  if (hasCurrentLine(row)) return Number(row.newLine);
+  return nearestCurrentLineBefore(rows, index) ?? nearestCurrentLineAfter(rows, index);
+}
+
+function rowForCurrentLine(rows: readonly DiffModelRow[], line: number): number {
+  const exact = rows.findIndex((row) => hasCurrentLine(row) && Number(row.newLine) === line);
+  if (exact >= 0) return exact;
+  const collapsed = rows.findIndex(
+    (row) => row.kind === "collapsed" && line >= Number(row.newStart) && line < Number(row.newStart) + row.lines
+  );
+  if (collapsed >= 0) return collapsed;
+  const following = rows.findIndex((row) => hasCurrentLine(row) && Number(row.newLine) > line);
+  if (following >= 0) return following;
+  return Math.max(0, rows.length - 1);
 }
 
 function tick(state: AppState): { state: AppState; effects: Effect[] } {
@@ -1024,7 +1107,14 @@ function updateMouse(state: AppState, mouse: MouseEvent, layout: FrameLayout): {
       ? { state: { ...state, focusedPane: "diff", mode: { kind: "normal" }, selection: null }, effects: [] }
       : { state, effects: [] };
   }
-  if (mouse.kind === "press") return moveCursorToRow(state, ref.logicalRow, layout.bodyRows, false);
+  if (mouse.kind === "press") {
+    const file = state.files[state.selectedFile];
+    const row = file && state.view === "cumulative" && state.renderMode === "syntax"
+      ? cumulativeDiffModel(file, state.expandedFiles.has(file.row.id)).rows[ref.logicalRow]
+      : undefined;
+    if (row?.kind === "collapsed") return toggleSelectedFileExpansion(state, true, Number(row.newStart));
+    return moveCursorToRow(state, ref.logicalRow, layout.bodyRows, false);
+  }
   if (mouse.kind === "move") return moveCursorToRow(state, ref.logicalRow, layout.bodyRows, true);
   if (mouse.kind === "release" && state.mode.kind === "visual") {
     return moveCursorToRow(state, ref.logicalRow, layout.bodyRows, true);
@@ -1310,7 +1400,7 @@ export function draftForCursor(state: AppState): AnnotationDraft | null {
   if (state.view !== "cumulative") return null;
   const file = state.files[state.selectedFile];
   if (!file) return null;
-  const model = cumulativeDiffModel(file);
+  const model = cumulativeDiffModel(file, state.expandedFiles.has(file.row.id));
   const range = selectedRange(state);
   const rows = model.rows.slice(range.start, range.end + 1);
   const anchorRange = anchorRangeForSelection(model.rows, range, rows);
@@ -1335,7 +1425,7 @@ function anchorRangeForSelection(
   range: { start: number; end: number },
   selectedRows: readonly DiffModelRow[]
 ): { start: number; end: number } | null {
-  if (selectedRows.every((row) => row.kind === "hunk")) return null;
+  if (selectedRows.every((row) => row.kind === "hunk" || row.kind === "collapsed")) return null;
   const currentRows = selectedRows.filter(hasCurrentLine);
   const first = currentRows[0]?.newLine;
   if (first !== undefined) {
@@ -1378,19 +1468,25 @@ function jumpToSelectedAnnotation(state: AppState): { state: AppState; effects: 
     const file = state.files[fileIndex];
     const automatic = automaticReanchorSelectedAnnotation(state, annotation, file);
     const draft = automatic.kind === "planned" ? automatic.draft : bestGuessDraftForAnnotation(state, file, annotation);
-    const rowRange = draft ? diffRowsForAnchor(file, draft.anchor) : null;
-    if (rowRange) {
+    const location = draft ? visibleAnchorLocation(state, fileIndex, draft.anchor) : null;
+    if (location) {
+      const positioned = {
+        ...location.state,
+        focusedPane: "diff" as const,
+        mode: { kind: "normal" as const },
+        cursorRow: diffRow(location.rowRange.start),
+        selection: location.rowRange.start === location.rowRange.end
+          ? null
+          : { anchor: diffRow(location.rowRange.start), head: diffRow(location.rowRange.end) },
+        statusMessage: `Jumped to stale annotation #${annotation.id} best-guess location`
+      };
       return {
         state: {
-          ...state,
-          selectedFile: fileIndex,
-          focusedPane: "diff",
-          view: "cumulative",
-          mode: { kind: "normal" },
-          cursorRow: diffRow(rowRange.start),
-          selection: rowRange.start === rowRange.end ? null : { anchor: diffRow(rowRange.start), head: diffRow(rowRange.end) },
-          scrollTop: { ...state.scrollTop, diff: diffScrollTopForLogicalRow(state, rowRange.start) },
-          statusMessage: `Jumped to stale annotation #${annotation.id} best-guess location`
+          ...positioned,
+          scrollTop: {
+            ...positioned.scrollTop,
+            diff: diffScrollTopForLogicalRow(positioned, location.rowRange.start)
+          }
         },
         effects: []
       };
@@ -1400,24 +1496,30 @@ function jumpToSelectedAnnotation(state: AppState): { state: AppState; effects: 
       effects: []
     };
   }
-  const rowRange = diffRowsForAnchor(state.files[fileIndex], annotation.anchor);
-  if (!rowRange) {
+  const location = visibleAnchorLocation(state, fileIndex, annotation.anchor);
+  if (!location) {
     return {
       state: { ...state, selectedFile: fileIndex, mode: { kind: "normal" }, statusMessage: "Annotation anchor is not visible in current diff" },
       effects: []
     };
   }
+  const positioned = {
+    ...location.state,
+    focusedPane: "diff" as const,
+    mode: { kind: "normal" as const },
+    cursorRow: diffRow(location.rowRange.start),
+    selection: location.rowRange.start === location.rowRange.end
+      ? null
+      : { anchor: diffRow(location.rowRange.start), head: diffRow(location.rowRange.end) },
+    statusMessage: `Jumped to annotation #${annotation.id}`
+  };
   return {
     state: {
-      ...state,
-      selectedFile: fileIndex,
-      focusedPane: "diff",
-      view: "cumulative",
-      mode: { kind: "normal" },
-      cursorRow: diffRow(rowRange.start),
-      selection: rowRange.start === rowRange.end ? null : { anchor: diffRow(rowRange.start), head: diffRow(rowRange.end) },
-      scrollTop: { ...state.scrollTop, diff: diffScrollTopForLogicalRow(state, rowRange.start) },
-      statusMessage: `Jumped to annotation #${annotation.id}`
+      ...positioned,
+      scrollTop: {
+        ...positioned.scrollTop,
+        diff: diffScrollTopForLogicalRow(positioned, location.rowRange.start)
+      }
     },
     effects: []
   };
@@ -1476,21 +1578,31 @@ function openConflictReanchorEditor(
   if (!draft) {
     return { state: { ...state, statusMessage: `${message}; select replacement range and press u` }, effects: [] };
   }
-  const rowRange = diffRowsForAnchor(file, draft.anchor);
+  const fileIndex = state.files.findIndex((candidate) => candidate.row.id === file.row.id);
+  const location = fileIndex < 0 ? null : visibleAnchorLocation(state, fileIndex, draft.anchor);
+  const base = location?.state ?? state;
+  const rowRange = location?.rowRange ?? null;
+  const positioned = {
+    ...base,
+    focusedPane: "diff" as const,
+    mode: {
+      kind: "comment" as const,
+      target: { kind: "reanchor" as const, annotationId: annotation.id, draft, oldSnippet: annotation.snippet },
+      initialText: annotation.comment,
+      role: annotation.role
+    },
+    cursorRow: diffRow(rowRange?.start ?? Number(base.cursorRow)),
+    selection: rowRange && rowRange.start !== rowRange.end
+      ? { anchor: diffRow(rowRange.start), head: diffRow(rowRange.end) }
+      : null,
+    statusMessage: `${message}; adjust re-anchor and save`
+  };
   return {
     state: {
-      ...state,
-      focusedPane: "diff",
-      mode: {
-        kind: "comment",
-        target: { kind: "reanchor", annotationId: annotation.id, draft, oldSnippet: annotation.snippet },
-        initialText: annotation.comment,
-        role: annotation.role
-      },
-      cursorRow: diffRow(rowRange?.start ?? Number(state.cursorRow)),
-      selection: rowRange && rowRange.start !== rowRange.end ? { anchor: diffRow(rowRange.start), head: diffRow(rowRange.end) } : null,
-      scrollTop: rowRange ? { ...state.scrollTop, diff: diffScrollTopForLogicalRow(state, rowRange.start) } : state.scrollTop,
-      statusMessage: `${message}; adjust re-anchor and save`
+      ...positioned,
+      scrollTop: rowRange
+        ? { ...positioned.scrollTop, diff: diffScrollTopForLogicalRow(positioned, rowRange.start) }
+        : positioned.scrollTop
     },
     effects: []
   };
@@ -1573,8 +1685,29 @@ function splitContentLines(content: string): string[] {
   return content.endsWith("\n") ? content.slice(0, -1).split("\n") : content.split("\n");
 }
 
-function diffRowsForAnchor(file: FileState, anchor: Anchor): { start: number; end: number } | null {
-  const model = cumulativeDiffModel(file);
+function visibleAnchorLocation(
+  state: AppState,
+  fileIndex: number,
+  anchor: Anchor
+): { state: AppState; rowRange: { start: number; end: number } } | null {
+  const file = state.files[fileIndex];
+  if (!file) return null;
+  const expanded = state.expandedFiles.has(file.row.id);
+  let rowRange = diffRowsForAnchor(file, anchor, expanded);
+  let expandedFiles = state.expandedFiles;
+  if (!rowRange && !expanded) {
+    rowRange = diffRowsForAnchor(file, anchor, true);
+    if (rowRange) expandedFiles = new Set([...state.expandedFiles, file.row.id]);
+  }
+  if (!rowRange) return null;
+  return {
+    state: { ...state, selectedFile: fileIndex, view: "cumulative", expandedFiles },
+    rowRange
+  };
+}
+
+function diffRowsForAnchor(file: FileState, anchor: Anchor, expanded: boolean): { start: number; end: number } | null {
+  const model = cumulativeDiffModel(file, expanded);
   const matching = model.rows
     .map((row, index) => ("newLine" in row && Number(row.newLine) >= Number(anchor.start) && Number(row.newLine) <= Number(anchor.end) ? index : null))
     .filter((index): index is number => index !== null);
@@ -1600,6 +1733,7 @@ function newestPatchId(state: AppState, fileId: FileId): PatchId | null {
 function rowText(row: DiffModelRow): string {
   switch (row.kind) {
     case "hunk":
+    case "collapsed":
       return row.text;
     case "add":
     case "del":
@@ -1636,6 +1770,7 @@ export function currentDiffVisualMap(
     historyEntry,
     width: layout.diffWidth,
     showProvenance: state.dataset.source.kind === "session",
+    expanded: state.expandedFiles.has(file.row.id),
     wrapLines: state.wrapLines
   });
 }
@@ -1663,7 +1798,7 @@ function currentDiffRows(state: AppState): DiffModelRow[] {
     const patch = patches[Math.max(0, Math.min(state.patchIdx, patches.length - 1))];
     return patch ? [{ kind: "hunk", text: "patch header" }, ...patch.displayDiff.split("\n").map((text) => ({ kind: "hunk" as const, text }))] : [];
   }
-  return cumulativeDiffModel(file).rows;
+  return cumulativeDiffModel(file, state.expandedFiles.has(file.row.id)).rows;
 }
 
 function historyCountForFile(state: AppState, fileId: FileId): number {
@@ -1771,12 +1906,13 @@ export function fileStateFromContent(row: FileRecord, current: string | null): F
   return file;
 }
 
-function cumulativeDiffModel(file: FileState): DiffModel {
-  const cached = cumulativeDiffModelCache.get(file);
+function cumulativeDiffModel(file: FileState, expanded = false): DiffModel {
+  const cache = expanded ? expandedDiffModelCache : cumulativeDiffModelCache;
+  const cached = cache.get(file);
   if (cached) return cached;
   const baseline = file.row.baseline.kind === "present" ? file.row.baseline.content : "";
-  const model = buildDiffModel(baseline, file.current ?? "", file.row.relPath);
-  cumulativeDiffModelCache.set(file, model);
+  const model = buildDiffModel(baseline, file.current ?? "", file.row.relPath, { context: expanded ? "full" : "patches" });
+  cache.set(file, model);
   return model;
 }
 

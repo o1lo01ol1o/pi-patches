@@ -4,7 +4,7 @@ export function renderStatusBar(state: AppState): string {
   const message = state.statusMessage ? ` | ${state.statusMessage}` : "";
   const pending = state.pendingKey ? ` | pending ${state.pendingKey}` : "";
   const counts = annotationCounts(state);
-  return `src:${sourceBadge(state)} | ${counts.draft} drafts | ${counts.queued} queued | ${counts.sent} sent | ${state.activeTab} | ${state.mode.kind} | s source | ? keys${pending}${message}`;
+  return `src:${sourceBadge(state)} | ${counts.draft} drafts | ${counts.queued} queued | ${counts.sent} sent | ${state.activeTab} | ${state.mode.kind}${pending}${message} | e expand | s source | ? keys`;
 }
 
 function sourceBadge(state: AppState): string {

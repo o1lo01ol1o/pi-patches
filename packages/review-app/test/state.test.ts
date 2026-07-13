@@ -535,6 +535,89 @@ test("h, l, tab, and Enter switch focus between panes", () => {
   assert.equal(state.focusedPane, "diff");
 });
 
+test("e expands one file to full context and collapses back onto the owning gap", () => {
+  const baseline = numberedContent(20);
+  const current = baseline.replace("line 10\n", "changed 10\n");
+  const file = makeFile(1, "long.txt", baseline, current);
+  const compact = buildDiffModel(baseline, current, "long.txt");
+  const prefixGap = compact.rows.findIndex((row) => row.kind === "collapsed");
+  let state = fixtureState({ files: [file], patches: [], cursorRow: prefixGap as DiffRow });
+
+  state = update(state, { kind: "key", key: "e" }).state;
+  assert.equal(state.expandedFiles.has(file.row.id), true);
+  assert.match(state.statusMessage ?? "", /Expanded long\.txt to full file/);
+  assert.match(stripAnsi(renderFrame(state, 100, 24).join("\n")), /context:full/);
+  assert.match(stripAnsi(renderFrame(state, 60, 14)[1] ?? ""), /^context:full · File: \/tmp\/long\.txt/);
+  assert.equal(draftForCursor(state)?.snippet, "line 1");
+
+  state = update(state, { kind: "key", key: "e" }).state;
+  assert.equal(state.expandedFiles.has(file.row.id), false);
+  assert.equal(Number(state.cursorRow), prefixGap);
+  assert.match(stripAnsi(renderFrame(state, 100, 24).join("\n")), /context:patches/);
+});
+
+test("Enter and a left click expand collapsed unchanged rows", () => {
+  const baseline = numberedContent(20);
+  const current = baseline.replace("line 10\n", "changed 10\n");
+  const file = makeFile(1, "long.txt", baseline, current);
+  const compact = buildDiffModel(baseline, current, "long.txt");
+  const gap = compact.rows.findIndex((row) => row.kind === "collapsed");
+  let state = fixtureState({ files: [file], patches: [], cursorRow: gap as DiffRow });
+
+  state = update(state, { kind: "key", key: "Enter" }).state;
+  assert.equal(state.expandedFiles.has(file.row.id), true);
+  assert.equal(draftForCursor(state)?.snippet, "line 1");
+
+  const layout = computeFrameLayout(100, 12);
+  state = fixtureState({ files: [file], patches: [], cursorRow: 2 as DiffRow });
+  const gapVisualRow = currentDiffVisualMap(state).starts[gap] ?? 0;
+  state = update(state, {
+    kind: "mouse",
+    mouse: { kind: "press", button: 0, x: layout.treeWidth + 3, y: layout.bodyTop + gapVisualRow + 1 },
+    layout
+  }).state;
+  assert.equal(state.expandedFiles.has(file.row.id), true);
+  assert.equal(draftForCursor(state)?.snippet, "line 1");
+});
+
+test("file expansion is per-file and native mode renders the full source", () => {
+  const baseline = numberedContent(20);
+  const first = makeFile(1, "first.txt", baseline, baseline.replace("line 10\n", "changed 10\n"));
+  const second = makeFile(2, "second.txt", baseline, baseline.replace("line 12\n", "changed 12\n"));
+  let state = fixtureState({ files: [first, second], patches: [], cursorRow: 0 as DiffRow });
+
+  state = update(state, { kind: "key", key: "e" }).state;
+  state = update(state, { kind: "key", key: "]" }).state;
+  assert.equal(state.selectedFile, 1);
+  assert.deepEqual([...state.expandedFiles], [first.row.id]);
+  assert.match(stripAnsi(renderFrame(state, 100, 24).join("\n")), /context:patches/);
+
+  state = update(state, { kind: "key", key: "[" }).state;
+  state = update(state, { kind: "key", key: "d" }).state;
+  const native = stripAnsi(renderFrame(state, 100, 24).join("\n"));
+  assert.match(native, /context:full/);
+  assert.match(native, /line 1/);
+});
+
+test("annotation jumps automatically expand anchors outside compact patch context", () => {
+  const baseline = numberedContent(20);
+  const current = baseline.replace("line 10\n", "changed 10\n");
+  const file = makeFile(1, "long.txt", baseline, current);
+  const annotation = makeAnnotation({ hash: file.currentHash, start: 1, snippet: "line 1" });
+  const state = fixtureState({
+    files: [file],
+    patches: [],
+    annotations: [annotation],
+    mode: { kind: "overlay", which: "annotations" },
+    cursorRow: 0 as DiffRow
+  });
+
+  const jumped = update(state, { kind: "key", key: "Enter" }).state;
+  assert.equal(jumped.expandedFiles.has(file.row.id), true);
+  assert.equal(jumped.mode.kind, "normal");
+  assert.equal(draftForCursor(jumped)?.snippet, "line 1");
+});
+
 test("gg and G move to top and bottom with a pending-key indicator", () => {
   let state = fixtureState({ cursorRow: 2 as DiffRow });
 
@@ -628,7 +711,7 @@ test("absolute file path header stays fixed while the selected tree row is highl
   const frame = renderFrame(state, 100, 8);
   const selectedRow = frame.find((line) => /\x1b\[48;2;58;58;74m/.test(line)) ?? "";
 
-  assert.match(stripAnsi(frame[1] ?? ""), /^File: \/tmp\/nested\/example\.txt/);
+  assert.match(stripAnsi(frame[1] ?? ""), /^context:patches · File: \/tmp\/nested\/example\.txt/);
   assert.match(selectedRow, /\x1b\[48;2;58;58;74m/);
   assert.match(stripAnsi(selectedRow), />    example\.txt \+1 -1/);
   assert.equal(visibleWidth(selectedRow), 100);
@@ -1576,6 +1659,7 @@ test("source selector filters choices and atomically preserves presentation stat
     renderMode: "native",
     wrapLines: false,
     tintMode: "off",
+    expandedFiles: new Set([1 as FileId]),
     viewport: viewportFromSize(132, 41)
   });
   const opened = update(base, { kind: "key", key: "s" });
@@ -1631,6 +1715,7 @@ test("source selector filters choices and atomically preserves presentation stat
   assert.equal(switched.renderMode, "native");
   assert.equal(switched.wrapLines, false);
   assert.equal(switched.tintMode, "off");
+  assert.deepEqual([...switched.expandedFiles], []);
   assert.deepEqual(switched.viewport, viewportFromSize(132, 41));
   assert.deepEqual(switched.sourceNavigation.lastSession, base.sourceNavigation.active);
   assert.deepEqual(switched.sourceNavigation.lastGit, stagedRequest);
@@ -1795,6 +1880,7 @@ function fixtureState(overrides: Partial<AppState> = {}): AppState {
     focusedPane: "diff",
     view: "cumulative",
     renderMode: "syntax",
+    expandedFiles: new Set(),
     wrapLines: true,
     tintMode: "gradient",
     colorDepth: "truecolor",
@@ -1948,6 +2034,10 @@ function makePatch(overrides: Partial<{ id: number; fileId: number; seq: number;
     postHash: overrides.postHash ?? hashContent("one\ntwo\n"),
     createdAt: overrides.createdAt ?? 2
   };
+}
+
+function numberedContent(count: number): string {
+  return Array.from({ length: count }, (_, index) => `line ${index + 1}`).join("\n") + "\n";
 }
 
 function unwrap<T>(result: Result<T>): T {

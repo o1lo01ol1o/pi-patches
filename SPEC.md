@@ -376,6 +376,7 @@ interface AppState {
   focusedPane: "tree" | "diff";
   view: "cumulative" | "history";        // history = individual patches
   renderMode: "syntax" | "native";       // native = pi's renderDiff verbatim
+  expandedFiles: ReadonlySet<FileId>;     // cumulative files shown with full context
   patchIdx: number;                      // history view
   cursorRow: DiffRow; scrollTop: { tree: number; diff: number };
   mode: Mode;
@@ -411,7 +412,19 @@ Unknown input sequences parse to *no* event (dropped explicitly), so `update` ne
 
 ### 6.4 Diff model & rendering
 
-**Model** (`render/diff-model.ts`): `Diff.structuredPatch(baselineOr"", currentOr"", {context: 3})` → flat row array `{ kind: "hunk"|"context"|"add"|"del", oldLine?: BaselineLine, newLine?: CurrentLine, text, attribution?: Attribution }` (§4.1 types). `newLine` is the coordinate a new annotation's anchor range is built from (at creation time the anchor version *is* the current version, so `AnchorLine` = `CurrentLine` by the freshness witness). Selections spanning `del` rows snap to the enclosing new-file range (nearest rows carrying `newLine`); a pure-deletion selection anchors to the preceding `newLine` with the deleted text as the snippet.
+**Model** (`render/diff-model.ts`): compact mode uses
+`Diff.structuredPatch(baselineOr"", currentOr"", {context: 3})` and produces a
+flat row array whose closed sum is `hunk | collapsed | context | add | del`.
+A `collapsed` row carries checked baseline/current starts plus its positive count
+of unchanged lines; it is a navigation affordance, never an annotatable source
+line. Full-file mode derives the same row algebra with enough context to cover
+both complete versions, including unchanged files whose compact model is a
+single collapsed row. `newLine` is the coordinate a new annotation's anchor
+range is built from (at creation time the anchor version *is* the current
+version, so `AnchorLine` = `CurrentLine` by the freshness witness). Selections
+spanning `del` rows snap to the enclosing new-file range (nearest rows carrying
+`newLine`); a pure-deletion selection anchors to the preceding `newLine` with the
+deleted text as the snippet. A collapsed row cannot silently become a comment.
 
 **Line attribution (session blame)** (`render/blame.ts`): each `add`/`del` row carries the `seq` of the patch that caused it, computed by replaying the file's stored `unified_patch` chain from `baseline_content` with `Diff.applyPatch`:
 - Maintain `Array<{ line: string; seq: number | 0 }>` (0 = baseline). Applying patch `seq`: removed lines are dropped and recorded in a deletion map `origBaselineLine → seq` (only lines that trace back to baseline matter — cumulative `del` rows are by definition baseline lines); added lines enter the array with `seq`.
@@ -435,11 +448,23 @@ Unknown input sequences parse to *no* event (dropped explicitly), so `update` ne
    - Gradient applies to syntax mode only; native mode is pi's verbatim `renderDiff` (uniform colors by design). `t` key cycles tint: `gradient → uniform → off`.
 4. Selection rows override the tint with `theme.getBgAnsi("selectedBg")`; annotated ranges get a `●` gutter marker, external (bash/manual) changes a `~` marker.
 
-**Native mode** (`d` toggles): `renderDiff(displayDiff, {filePath})` verbatim — pixel-identical to pi's chat rendering, including intra-line word-diff inverse. Cumulative native view feeds `generateDiffString(baseline, current).diff` into it; Git per-commit history feeds the source adapter's stored per-file display diff.
+**Per-file context expansion:** cumulative view starts compact. Every omitted
+prefix, inter-hunk gap, or suffix is represented by a visible
+`N unchanged lines` row. `e` toggles the selected file between compact patch
+context and the complete file; `Enter` or a left click on a collapsed row expands
+it and lands on the first revealed line. Expansion is per file, is reset when a
+new review dataset is selected, and preserves the nearest checked current-line
+coordinate when toggled. Collapsing a cursor that is outside patch context lands
+on the collapsed row that owns that line. Expanded unchanged lines are ordinary
+`context` rows and therefore support line clicking, wrapping, visual selection,
+and annotations. The sticky header always says `context:patches` or
+`context:full`.
+
+**Native mode** (`d` toggles): `renderDiff(displayDiff, {filePath})` verbatim — pixel-identical to pi's chat rendering, including intra-line word-diff inverse. Cumulative native view feeds `generateDiffString(baseline, current, contextLines).diff` into it, where `contextLines` is compact or complete according to the selected file's expansion state; Git per-commit history feeds the source adapter's stored per-file display diff.
 
 **History view** (`H` toggles): session patches form one global `seq`-ordered stream across files. Landing via `n`, `p`, or `f` selects the patch's file, replays that file from its checked baseline through the selected patch, and renders the complete syntax-highlighted post-patch file under `patch 3/7 · full file after edit · 14:02:31`. The cursor lands at `first_changed_line` and scrolls it into the upper third of the viewport. Every replay-attributed line receives the same persisted-age gradient as cumulative syntax mode. Historical navigation and reopening do not animate or change tint. Only a new tail patch received during active follow mode applies a six-frame theme-aware green pulse at 120 ms per frame to lines added or replaced by that patch, or the surviving anchor line for a pure deletion; the stable age tint remains after the pulse. Replay failure renders an explicit chain-break message; it never substitutes the isolated patch or a guessed partial file. Git per-commit history remains an isolated native diff.
 
-**Caches** (all keyed by checked identities/content hashes, sha256 computed once per read): highlighted-lines LRU (~20 versions ≈ current+baseline per file), diff model per `(baselineHash, currentHash)`, native `renderDiff` output per source entry, full-file patch snapshots by patch-array identity/baseline/patch id with incremental replay, and visual row maps by selected version and width. Composition of the ~50 visible rows happens per frame, uncached — string concat of pre-rendered pieces, well under a millisecond; pi-tui coalesces renders to ~60 fps and wraps frames in synchronized-output (`\x1b[?2026`, `tui.ts:1286-1308`), so the app stays flicker-free.
+**Caches** (all keyed by checked identities/content hashes, sha256 computed once per read): highlighted-lines LRU (~20 versions ≈ current+baseline per file), compact/full diff model per `(baselineHash, currentHash, contextMode)`, native `renderDiff` output per source entry and context mode, full-file patch snapshots by patch-array identity/baseline/patch id with incremental replay, and visual row maps by selected version, context mode, and width. Only the selected expanded file is composed; expansion never materializes every file in a large source. Composition of the ~50 visible rows happens per frame, uncached — string concat of pre-rendered pieces, well under a millisecond; pi-tui coalesces renders to ~60 fps and wraps frames in synchronized-output (`\x1b[?2026`, `tui.ts:1286-1308`), so the app stays flicker-free.
 
 ### 6.5 Input
 
@@ -450,18 +475,19 @@ Unknown input sequences parse to *no* event (dropped explicitly), so `update` ne
 | `j` / `k` / arrows | cursor down/up | `v` | visual-line mode (Esc cancels) |
 | `gg` / `G` | top / bottom (pending-key, 500 ms) | `c` | comment on selection (or cursor line) |
 | `ctrl+d` / `ctrl+u` | half-page | `a` | annotation list overlay |
-| `ctrl+e` / `ctrl+y` | scroll one line | `e` / `x` | edit / delete annotation (non-sent) |
+| `ctrl+e` / `ctrl+y` | scroll one line | `e` | expand/collapse selected file (annotation overlay: edit) |
+| | | `x` | delete annotation (non-sent, annotation overlay) |
 | | | `u` | re-anchor stale annotation onto current patch |
 | `h` / `l`, `tab` | pane focus | `S` | submit: all drafts → queued (y/n confirm) |
 | `[` / `]` | prev / next file | `H` | cumulative ⇄ history view |
 | `{` / `}` | prev / next hunk | `d` | syntax ⇄ native render mode |
 | `n` / `p` | prev / next patch (history) | `t` | tint cycle: gradient → uniform → off |
-| `enter` | tree → focus diff | `r` | refresh |
+| `enter` | tree → focus diff; expand collapsed gap | `r` | refresh |
 | `q` | quit (Esc unwinds modes first) | `?` | key-binding overlay |
 
 **Mouse** (`mouse.ts`): registered via `tui.addInputListener` (runs before focus dispatch, `tui.ts:649`); pi-tui's `StdinBuffer` already reassembles split SGR sequences into whole chunks (`stdin-buffer.ts:102-120`), so matching `^\x1b\[<(\d+);(\d+);(\d+)([Mm])$` per chunk is reliable. Consumed sequences never reach focused components.
 - The embedded component enables SGR button-motion and coordinate reporting on entry (`1002` + `1006`) and disables exactly those modes on disposal. It does not assume pi or Ghostty has already enabled mouse reporting, and it never changes raw mode, alternate-screen state, or the keyboard protocol.
-- Button 0 press → hit-test against the two-row header and live pane geometry: tab label = switch view; tree row = select the exact visible file (`treeScrollTop + row`); diff row = move to the exact visible line (`diffScrollTop + row`). Blank body rows and the status row never snap to the last file or line.
+- Button 0 press → hit-test against the two-row header and live pane geometry: tab label = switch view; tree row = select the exact visible file (`treeScrollTop + row`); diff row = move to the exact visible line (`diffScrollTop + row`); typed collapsed-gap row = expand the selected file and land on its first revealed line. Blank body rows and the status row never snap to the last file or line.
 - Motion flag (bit 32) while left button held → extend selection (auto-enters visual mode); release (`m`) finalizes.
 - Wheel (64/65, including modifier bits) → scroll only the pane or full-width result view under the pointer by a viewport-adaptive step, clamped independently for the file tree, diff, Notes, Narrative, and Review views. Multiple SGR events arriving in one terminal input chunk are all decoded in order.
 
@@ -1018,7 +1044,11 @@ multi-event chunks, modifier wheels, independent pane scrolling, scrolled file
 and line clicks, blank-row clicks, drag/release selection, responsive resize, and
 enable/disable cleanup. Wrapping tests cover ANSI spans, wide graphemes, unbroken
 tokens, syntax and native/history views, wrap toggling, continuation hit-testing,
-visual-row wheel scrolling, and cached large-diff rendering.
+visual-row wheel scrolling, and cached large-diff rendering. Expansion tests cover
+leading/inter-hunk/trailing collapsed ranges, `e`, `Enter`, and mouse expansion,
+cursor-coordinate preservation on collapse, distant-line annotation, complete
+native/syntax rendering, per-file isolation, dataset reset, and viewport-bounded
+cached rendering of a 20,000-line expanded file.
 Session-history reducer tests cover cross-file previous/next navigation, boundary
 clamping, follow-tail refresh, and manual follow disengagement. File-tree tests
 cover simultaneous add/delete backgrounds, tint-off behavior, and ANSI-safe
@@ -1030,6 +1060,8 @@ track without changing total frame width.
 session, then use `s` without leaving the component to switch through staged,
 unstaged, complete working tree, branch range, and back to the session; inspect a
 non-destructive PR source; create prioritized agent findings and human callouts;
+expand a file by key and collapsed-row click, inspect and annotate a line outside
+all patch hunks, then collapse it without losing the corresponding location;
 exercise each finish action; run both analysis modes with an explicitly selected
 model; verify persisted model/prompt/source/coverage metadata; press `q` and
 confirm pi's editor/footer/terminal are restored with no child process, new

@@ -233,6 +233,7 @@ n/p              previous/next patch or history entry
 f                follow the latest session patch
 s                switch session/Git source
 d                syntax/native diff rendering
+e                expand/collapse the selected file
 w                toggle line wrapping
 t                gradient/uniform/off tint mode
 r                refresh
@@ -267,6 +268,23 @@ the full tree width. Other file rows apply the active tint mode independently to
 non-zero green `+N` and red `-N` counters, so a modified file can display both
 colors.
 
+### Expand File Context
+
+Cumulative diffs start in compact patch-context mode. Every omitted unchanged
+prefix, inter-hunk region, and suffix is represented by an explicit collapsed
+row. Press `e` to toggle the selected file between patch context and the complete
+current file. Press `Enter` or left-click a collapsed row to expand and land on
+the first revealed source line. Expansion is tracked independently per file, and
+the sticky path header reports `context:patches` or `context:full`.
+
+Full-file context works in both syntax and native rendering. Revealed unchanged
+lines retain source line numbers, syntax highlighting, wrapping, mouse hit
+testing, selection, and comment anchoring. Collapsing preserves the current
+source coordinate by returning to the collapsed row that owns it. Jumping to an
+annotation outside compact patch context automatically re-expands that file.
+Switching review sources clears expansion state because it is bound to the old
+dataset.
+
 Useful markers:
 
 ```text
@@ -295,6 +313,7 @@ exit path. In Ghostty and other SGR-mouse terminals:
 - click a header tab to switch views;
 - click a visible file to select it;
 - click a diff line or continuation to select its logical source line;
+- click a collapsed unchanged region to expand the complete file;
 - drag with the left button to create or extend an exact line selection;
 - wheel over the file tree, diff, or full-width result to scroll that pane;
 - scrolled and resized panes use their current offsets for every hit test.

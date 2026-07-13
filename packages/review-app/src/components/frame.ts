@@ -19,13 +19,16 @@ export function renderFrame(state: AppState, width: number, height: number): str
   const visibleRenderMode = state.view === "history"
     ? state.dataset.source.kind === "session" && state.historyEntries.length === 0 ? "file" : "native"
     : state.renderMode;
+  const fileContext = state.view === "cumulative"
+    ? `context:${selectedFile && state.expandedFiles.has(selectedFile.row.id) ? "full" : "patches"} · `
+    : "";
   const tint = showProvenance && state.view === "cumulative" ? ` · tint:${state.tintMode}${tintLegend}` : "";
   const patchPosition = sessionPatchPosition(state);
   const patchNavigation = patchPosition === null
     ? ""
     : ` · patch ${patchPosition.index + 1}/${patchPosition.total}${patchPosition.following ? " · following" : ""}`;
   lines.push(pad(`${tabHeader(state)} · ${state.wrapLines ? "wrap" : "nowrap"} · ${state.view} · ${visibleRenderMode}${patchNavigation}${tint} · ${sourceLabel(state)}${sourceHistoryLabel(state)}`, columns));
-  if (rows >= 3) lines.push(pad(`File: ${selectedPath}`, columns));
+  if (rows >= 3) lines.push(pad(`${fileContext}File: ${selectedPath}`, columns));
 
   if (state.activeTab === "diff") {
     const treeLines = renderFileTree(
@@ -61,6 +64,7 @@ export function renderFrame(state: AppState, width: number, height: number): str
           width: diffWidth,
           selectedRange: selectedRange(state),
           showProvenance,
+          expanded: state.expandedFiles.has(file.row.id),
           wrapLines: state.wrapLines,
           visualMap: currentDiffVisualMap(state, width, height),
           patchLanding: state.patchLanding === null
@@ -245,7 +249,7 @@ function overlayLines(state: AppState, width: number, height: number): string[] 
       "h/l/tab focus        Enter focus diff           v visual selection",
       "c comment            a annotations              S submit drafts",
       "H history   n/p previous/next patch   f follow latest patch",
-      "s switch source   d native/syntax   w wrap   t tint   r refresh",
+      "s switch source   e expand/collapse file   d native/syntax   w wrap   t tint   r refresh",
       "I guidelines   ? key bindings   q quit   Esc close",
       "Annotations: j/k select, Enter jump, e edit, u re-anchor, x delete"
     ], width, height);
