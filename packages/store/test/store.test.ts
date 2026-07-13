@@ -14,6 +14,7 @@ import {
   checkedSessionId,
   hashReviewSource,
   hashContent,
+  parseReviewSource,
   PatchStore,
   type ContentHash,
   type Result
@@ -21,6 +22,21 @@ import {
 import { migrations, schemaVersion } from "../src/schema.ts";
 
 const thisDir = dirname(fileURLToPath(import.meta.url));
+
+test("review source parser preserves staged and unstaged boundaries", () => {
+  assert.deepEqual(unwrap(parseReviewSource({ kind: "staged", base: "HEAD", head: "INDEX" })), {
+    kind: "staged",
+    base: "HEAD",
+    head: "INDEX"
+  });
+  assert.deepEqual(unwrap(parseReviewSource({ kind: "unstaged", base: "INDEX", head: "WORKTREE" })), {
+    kind: "unstaged",
+    base: "INDEX",
+    head: "WORKTREE"
+  });
+  assert.equal(parseReviewSource({ kind: "staged", base: "HEAD", head: "WORKTREE" }).ok, false);
+  assert.equal(parseReviewSource({ kind: "unstaged", base: "HEAD", head: "WORKTREE" }).ok, false);
+});
 
 test("fresh and migrated databases have the same normalized schema", () => {
   const dir = mkdtempSync(join(tmpdir(), "pi-patches-schema-"));

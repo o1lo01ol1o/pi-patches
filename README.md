@@ -103,6 +103,8 @@ Direct forms use the same parser:
 ```text
 /patches inspect session [session-id]
 /patches inspect working-tree
+/patches inspect staged
+/patches inspect unstaged
 /patches inspect branch <base> [head]
 /patches inspect commit <sha>
 /patches inspect range <base>..<head>
@@ -110,7 +112,7 @@ Direct forms use the same parser:
 /patches inspect snapshot <path> [path ...]
 ```
 
-Git sources accept either history mode:
+Commit-bearing Git sources accept either history mode:
 
 ```text
 --history squashed
@@ -129,7 +131,11 @@ Examples:
 Source behavior:
 
 - `session` uses the SQLite baseline, patch chain, attribution, and live disk.
-- `working-tree` compares the complete current worktree with `HEAD`.
+- `working-tree` compares `HEAD` with the complete worktree, including staged,
+  unstaged, and untracked changes.
+- `staged` compares `HEAD` with the index. Worktree-only edits are excluded.
+- `unstaged` compares the index with the worktree and includes untracked files.
+  Index-only changes are excluded.
 - `branch` compares the merge base of base/head with the selected head.
 - `commit` reviews one commit.
 - `range` reviews the base-exclusive to head-inclusive commit sequence.
@@ -137,6 +143,32 @@ Source behavior:
 - `snapshot` reads current path contents and has no synthetic Git history.
 - `squashed` shows baseline-to-head net change.
 - `per-commit` retains every selected commit, including changes later reverted.
+
+### Switch the open source
+
+Press `s` from any non-modal review view to open the searchable source selector
+without leaving the TUI. It lists recorded sessions, complete/staged/unstaged Git
+changes, base branches, recent commits, ranges, pull requests, and snapshots.
+Type to filter, use the arrow keys to select, and press `Enter`. Ranges, pull
+requests, and snapshots prompt for their argument; commit-bearing sources also
+prompt for squashed or per-commit history.
+
+The selector remembers the most recently viewed session source and Git source.
+After both families have been visited, `s` followed by `Enter` toggles directly
+to the other one, preserving its exact history choice. The active source and Git
+history mode remain in the sticky header.
+
+Loading keeps the current dataset active until the replacement is complete.
+`Escape` cancels a pending switch, and a Git/database error leaves the prior
+source untouched. Wrap, tint, render mode, pane focus, and terminal geometry are
+preserved; file/history cursors, annotations, and analysis runs are replaced with
+the selected source's fingerprint-bound state. Draft notes remain stored against
+their original source and are never copied to another diff.
+
+`r` re-materializes the active non-session source at its own boundary, so a
+staged refresh still reads `HEAD -> INDEX` and an unstaged refresh still reads
+`INDEX -> WORKTREE`. Only the selected source is materialized; selector entries
+do not keep inactive large diffs in memory.
 
 ### Analyze a source
 
@@ -199,6 +231,7 @@ Escape           close a mode or cancel a selection
 H                cumulative/history view
 n/p              previous/next patch or history entry
 f                follow the latest session patch
+s                switch session/Git source
 d                syntax/native diff rendering
 w                toggle line wrapping
 t                gradient/uniform/off tint mode

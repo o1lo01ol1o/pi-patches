@@ -6,6 +6,7 @@ import { renderDiffPane } from "./diff-pane.ts";
 import { renderFileTree } from "./file-tree.ts";
 import { renderStatusBar } from "./status-bar.ts";
 import { currentDiffVisualMap, sessionPatchPosition, type AppState } from "../state.ts";
+import { filterSourceOptions } from "../sources/selector.ts";
 
 export function renderFrame(state: AppState, width: number, height: number): string[] {
   const { rows, columns, bodyRows, bodyTop, treeWidth, diffWidth } = computeFrameLayout(width, height);
@@ -23,7 +24,7 @@ export function renderFrame(state: AppState, width: number, height: number): str
   const patchNavigation = patchPosition === null
     ? ""
     : ` · patch ${patchPosition.index + 1}/${patchPosition.total}${patchPosition.following ? " · following" : ""}`;
-  lines.push(pad(`${tabHeader(state)} · ${state.wrapLines ? "wrap" : "nowrap"} · ${state.view} · ${visibleRenderMode}${patchNavigation}${tint} · ${sourceLabel(state)}`, columns));
+  lines.push(pad(`${tabHeader(state)} · ${state.wrapLines ? "wrap" : "nowrap"} · ${state.view} · ${visibleRenderMode}${patchNavigation}${tint} · ${sourceLabel(state)}${sourceHistoryLabel(state)}`, columns));
   if (rows >= 3) lines.push(pad(`File: ${selectedPath}`, columns));
 
   if (state.activeTab === "diff") {
@@ -81,6 +82,9 @@ export function renderFrame(state: AppState, width: number, height: number): str
 
   if (state.mode.kind === "comment" && rows >= 2) {
     lines[rows - 2] = pad("note editor · Ctrl-P priority · Ctrl-A audience · Ctrl-T finding/callout", columns);
+  } else if (state.mode.kind === "sourceSelector" || state.mode.kind === "sourceInput" || state.mode.kind === "sourceHistory" || state.mode.kind === "sourceLoading") {
+    lines.splice(bodyTop, bodyRows, ...sourceModeLines(state, columns, bodyRows));
+    while (lines.length < rows - 1) lines.push(" ".repeat(columns));
   } else if (state.mode.kind === "overlay") {
     lines.splice(bodyTop, bodyRows, ...overlayLines(state, columns, bodyRows));
     while (lines.length < rows - 1) lines.push(" ".repeat(columns));
@@ -110,6 +114,8 @@ function sourceLabel(state: AppState): string {
   switch (source.kind) {
     case "session": return `session ${source.sessionId}`;
     case "workingTree": return "working tree";
+    case "staged": return "staged HEAD..INDEX";
+    case "unstaged": return "unstaged INDEX..WORKTREE";
     case "branch": return `${shortRef(source.baseRef)}..${shortRef(source.headRef)}`;
     case "commit": return `commit ${shortRef(source.sha)}`;
     case "commitRange": return `${shortRef(source.baseExclusive)}..${shortRef(source.headInclusive)}`;
@@ -120,6 +126,12 @@ function sourceLabel(state: AppState): string {
 
 function shortRef(value: string): string {
   return /^[0-9a-f]{40,64}$/.test(value) ? value.slice(0, 8) : value;
+}
+
+function sourceHistoryLabel(state: AppState): string {
+  const source = state.dataset.source;
+  if (source.kind !== "branch" && source.kind !== "commit" && source.kind !== "commitRange" && source.kind !== "pullRequest") return "";
+  return ` · hist:${state.dataset.historyMode === "perCommit" ? "per-commit" : "squashed"}`;
 }
 
 function tabBody(state: AppState, width: number): string[] {
@@ -233,7 +245,7 @@ function overlayLines(state: AppState, width: number, height: number): string[] 
       "h/l/tab focus        Enter focus diff           v visual selection",
       "c comment            a annotations              S submit drafts",
       "H history   n/p previous/next patch   f follow latest patch",
-      "d native/syntax   w wrap   t tint   r refresh",
+      "s switch source   d native/syntax   w wrap   t tint   r refresh",
       "I guidelines   ? key bindings   q quit   Esc close",
       "Annotations: j/k select, Enter jump, e edit, u re-anchor, x delete"
     ], width, height);
@@ -249,6 +261,62 @@ function overlayLines(state: AppState, width: number, height: number): string[] 
     );
   }
   return padWindow(renderAnnotations(state, width, height), width, height);
+}
+
+function sourceModeLines(state: AppState, width: number, height: number): string[] {
+  const mode = state.mode;
+  if (mode.kind === "sourceLoading") {
+    return padWindow([
+      mode.operation === "listing" ? "Review sources" : mode.operation === "refreshing" ? "Refreshing source" : "Switching source",
+      mode.label,
+      "",
+      "The current source remains active until loading succeeds.",
+      "Esc cancels"
+    ], width, height);
+  }
+  if (mode.kind === "sourceInput") {
+    const prompt = mode.input === "commitRange"
+      ? "Commit range (base..head)"
+      : mode.input === "pullRequest"
+        ? "Pull request number"
+        : "Snapshot paths (quotes supported)";
+    return padWindow([
+      "Review source",
+      prompt,
+      "",
+      `> ${mode.text}`,
+      "",
+      "Enter continues · Backspace edits · Esc cancels"
+    ], width, height);
+  }
+  if (mode.kind === "sourceHistory") {
+    const choices = ["Squashed net change", "Per-commit history"];
+    return padWindow([
+      "History mode",
+      "",
+      ...choices.map((choice, index) => `${index === mode.selected ? ">" : " "} ${choice}`),
+      "",
+      "Arrow keys choose · Enter switches · Esc cancels"
+    ], width, height);
+  }
+  if (mode.kind !== "sourceSelector") return [];
+  const options = filterSourceOptions(mode.options, mode.query);
+  const availableRows = Math.max(1, height - 5);
+  const start = Math.max(0, Math.min(mode.selected - Math.floor(availableRows / 2), Math.max(0, options.length - availableRows)));
+  const optionLines = options.length === 0
+    ? ["  No matching sources"]
+    : options.slice(start, start + availableRows).map((option, index) => {
+        const absoluteIndex = start + index;
+        return `${absoluteIndex === mode.selected ? ">" : " "} ${option.label} · ${option.description}`;
+      });
+  return padWindow([
+    "Review source",
+    `Filter: ${mode.query}`,
+    "",
+    ...optionLines,
+    "",
+    "Type to filter · arrows choose · Enter opens/switches · Esc cancels"
+  ], width, height);
 }
 
 function renderAnnotations(state: AppState, width: number, height: number): string[] {

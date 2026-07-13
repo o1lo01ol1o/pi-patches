@@ -17,6 +17,8 @@ export type Verdict = "correct" | "needsAttention";
 export type ReviewSource =
   | { kind: "session"; sessionId: SessionId }
   | { kind: "workingTree"; base: "HEAD" }
+  | { kind: "staged"; base: "HEAD"; head: "INDEX" }
+  | { kind: "unstaged"; base: "INDEX"; head: "WORKTREE" }
   | { kind: "branch"; baseRef: string; headRef: string }
   | { kind: "commit"; sha: string }
   | { kind: "commitRange"; baseExclusive: string; headInclusive: string }
@@ -216,6 +218,14 @@ export function parseReviewSource(value: unknown): Result<ReviewSource> {
       return nonEmpty(value.sessionId, "sessionId", (sessionId) => ({ kind: "session", sessionId: sessionId as SessionId }));
     case "workingTree":
       return value.base === "HEAD" ? ok({ kind: "workingTree", base: "HEAD" }) : invalidSource("workingTree base must be HEAD");
+    case "staged":
+      return value.base === "HEAD" && value.head === "INDEX"
+        ? ok({ kind: "staged", base: "HEAD", head: "INDEX" })
+        : invalidSource("staged boundaries must be HEAD and INDEX");
+    case "unstaged":
+      return value.base === "INDEX" && value.head === "WORKTREE"
+        ? ok({ kind: "unstaged", base: "INDEX", head: "WORKTREE" })
+        : invalidSource("unstaged boundaries must be INDEX and WORKTREE");
     case "branch":
       return twoStrings(value.baseRef, value.headRef, "baseRef", "headRef", (baseRef, headRef) => ({ kind: "branch", baseRef, headRef }));
     case "commit":

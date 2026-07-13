@@ -104,17 +104,30 @@ export function materializeGitSource(
   });
 }
 
+export type WorkingDiffKind = "workingTree" | "staged" | "unstaged";
+
 export function materializeWorkingTree(cwd: string, historyMode: HistoryMode, runner: CommandRunner): Result<ReviewDataset> {
+  return materializeWorkingDiff(cwd, "workingTree", historyMode, runner);
+}
+
+export function materializeWorkingDiff(
+  cwd: string,
+  kind: WorkingDiffKind,
+  historyMode: HistoryMode,
+  runner: CommandRunner
+): Result<ReviewDataset> {
   if (historyMode !== "squashed") {
-    return err({ kind: "InvalidInput", field: "historyMode", message: "workingTree supports only squashed history" });
+    return err({ kind: "InvalidInput", field: "historyMode", message: `${kind} supports only squashed history` });
   }
   const root = gitRoot(cwd, runner);
   if (!root.ok) return root;
   const head = resolveCommit(root.value, "HEAD", runner);
   if (!head.ok) return head;
-  const changes = nameStatusBetween(root.value, head.value, null, runner);
+  const changes = workingNameStatus(root.value, head.value, kind, runner);
   if (!changes.ok) return changes;
-  const untracked = gitText(root.value, ["ls-files", "--others", "--exclude-standard", "-z"], runner);
+  const untracked = kind === "staged"
+    ? ok("")
+    : gitText(root.value, ["ls-files", "--others", "--exclude-standard", "-z"], runner);
   if (!untracked.ok) return untracked;
   const byPath = new Map(
     changes.value
@@ -124,23 +137,31 @@ export function materializeWorkingTree(cwd: string, historyMode: HistoryMode, ru
   for (const path of splitNul(untracked.value)) {
     if (!isPiPatchesState(path) && !byPath.has(path)) byPath.set(path, { code: "A", path, oldPath: null });
   }
-  const staged = changedPathSet(root.value, ["diff", "--cached", "--name-only", "-z", "HEAD"], runner);
+  const staged = kind === "workingTree"
+    ? changedPathSet(root.value, ["diff", "--cached", "--name-only", "-z", "HEAD"], runner)
+    : ok(new Set<string>());
   if (!staged.ok) return staged;
-  const unstaged = changedPathSet(root.value, ["diff", "--name-only", "-z"], runner);
+  const unstaged = kind === "workingTree"
+    ? changedPathSet(root.value, ["diff", "--name-only", "-z"], runner)
+    : ok(new Set<string>());
   if (!unstaged.ok) return unstaged;
   const untrackedSet = new Set(splitNul(untracked.value));
 
   const documents: ReviewDocument[] = [];
   for (const change of [...byPath.values()].sort((left, right) => left.path.localeCompare(right.path))) {
-    const baseline = readTreeSide(root.value, head.value, change.oldPath ?? change.path, runner);
+    const baseline = kind === "unstaged"
+      ? readIndexSide(root.value, change.oldPath ?? change.path, runner)
+      : readTreeSide(root.value, head.value, change.oldPath ?? change.path, runner);
     if (!baseline.ok) return baseline;
-    const current = readWorkingSide(root.value, change.path, head.value, runner);
+    const current = kind === "staged"
+      ? readIndexSide(root.value, change.path, runner)
+      : readWorkingSide(root.value, change.path, head.value, runner);
     if (!current.ok) return current;
     const provenance: Attribution[] = [];
-    if (staged.value.has(change.path) || (change.oldPath !== null && staged.value.has(change.oldPath))) {
+    if (kind === "staged" || staged.value.has(change.path) || (change.oldPath !== null && staged.value.has(change.oldPath))) {
       provenance.push({ kind: "workingTree", area: "index" });
     }
-    if (unstaged.value.has(change.path) || (change.oldPath !== null && unstaged.value.has(change.oldPath))) {
+    if ((kind === "unstaged" && !untrackedSet.has(change.path)) || unstaged.value.has(change.path) || (change.oldPath !== null && unstaged.value.has(change.oldPath))) {
       provenance.push({ kind: "workingTree", area: "worktree" });
     }
     if (untrackedSet.has(change.path)) provenance.push({ kind: "workingTree", area: "untracked" });
@@ -153,7 +174,7 @@ export function materializeWorkingTree(cwd: string, historyMode: HistoryMode, ru
       provenance
     }));
   }
-  const source = { kind: "workingTree", base: "HEAD" } as const;
+  const source = workingReviewSource(kind);
   const fingerprint = hashReviewSource({
     source,
     pinnedHead: head.value,
@@ -161,6 +182,24 @@ export function materializeWorkingTree(cwd: string, historyMode: HistoryMode, ru
     documents: documents.map(normalizedDocumentFingerprint)
   });
   return ok({ source, historyMode, fingerprint, documents, commits: [] });
+}
+
+function workingReviewSource(kind: WorkingDiffKind): Extract<ReviewSource, { kind: WorkingDiffKind }> {
+  switch (kind) {
+    case "workingTree": return { kind: "workingTree", base: "HEAD" };
+    case "staged": return { kind: "staged", base: "HEAD", head: "INDEX" };
+    case "unstaged": return { kind: "unstaged", base: "INDEX", head: "WORKTREE" };
+  }
+}
+
+function workingNameStatus(cwd: string, head: string, kind: WorkingDiffKind, runner: CommandRunner): Result<NameStatus[]> {
+  const args = kind === "workingTree"
+    ? ["diff", "--name-status", "-z", "-M", head]
+    : kind === "staged"
+      ? ["diff", "--cached", "--name-status", "-z", "-M", head]
+      : ["diff", "--name-status", "-z", "-M"];
+  const output = gitText(cwd, args, runner);
+  return output.ok ? parseNameStatus(output.value) : output;
 }
 
 function isPiPatchesState(path: string): boolean {
@@ -372,7 +411,9 @@ function readWorkingSide(cwd: string, path: string, head: string, runner: Comman
     }
     const stat = lstatSync(absolute);
     if (stat.isDirectory()) {
-      const baseline = readTreeSide(cwd, head, path, runner);
+      const index = readIndexSide(cwd, path, runner);
+      if (!index.ok) return index;
+      const baseline = index.value.kind === "submodule" ? index : readTreeSide(cwd, head, path, runner);
       if (!baseline.ok) return baseline;
       if (baseline.value.kind !== "submodule") {
         return err({ kind: "Io", path: absolute, message: "unexpected directory in working-tree file set" });

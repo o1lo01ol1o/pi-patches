@@ -6,7 +6,7 @@ import {
   type ReviewDataset,
   type SessionRecord
 } from "@pi-patches/store";
-import { materializeGitSource, materializeWorkingTree } from "./git.ts";
+import { materializeGitSource, materializeWorkingDiff, materializeWorkingTree } from "./git.ts";
 import { materializePullRequest } from "./pull-request.ts";
 import { materializeSessionSource } from "./session.ts";
 import { materializeSnapshot } from "./snapshot.ts";
@@ -26,15 +26,19 @@ export function materializeInspectRequest(request: InspectRequest, context: Mate
   let dataset: Result<ReviewDataset>;
   switch (request.source.kind) {
     case "session": {
-      const session = request.source.sessionId === null
-        ? ok(context.currentSession)
-        : resolveSession(context.store, request.source.sessionId);
+      const session = resolveInspectSession(request, context);
       if (!session.ok) return session;
       dataset = materializeSessionSource(context.store, session.value, request.historyMode);
       break;
     }
     case "workingTree":
       dataset = materializeWorkingTree(context.cwd, request.historyMode, runner);
+      break;
+    case "staged":
+      dataset = materializeWorkingDiff(context.cwd, "staged", request.historyMode, runner);
+      break;
+    case "unstaged":
+      dataset = materializeWorkingDiff(context.cwd, "unstaged", request.historyMode, runner);
       break;
     case "branch":
       dataset = materializeGitSource(context.cwd, { kind: "branch", baseRef: request.source.baseRef, headRef: request.source.headRef }, request.historyMode, runner);
@@ -64,6 +68,12 @@ export function materializeInspectRequest(request: InspectRequest, context: Mate
     createdAt: context.now?.() ?? Date.now()
   });
   return saved.ok ? dataset : saved;
+}
+
+export function resolveInspectSession(request: InspectRequest, context: MaterializeContext): Result<SessionRecord> {
+  return request.source.kind !== "session" || request.source.sessionId === null
+    ? ok(context.currentSession)
+    : resolveSession(context.store, request.source.sessionId);
 }
 
 function resolveSession(store: PatchStore, selector: string): Result<SessionRecord> {

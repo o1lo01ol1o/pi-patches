@@ -1060,12 +1060,15 @@ test("help overlay documents navigation, annotations, rendering, and refresh key
   assert.match(frame, /ctrl\+d\/ctrl\+u half-page/);
   assert.match(frame, /Annotations: j\/k select, Enter jump, e edit, u re-anchor, x delete/);
   assert.match(frame, /H history\s+n\/p previous\/next patch\s+f follow latest patch/);
+  assert.match(frame, /s switch source/);
   assert.match(frame, /d native\/syntax\s+w wrap\s+t tint\s+r refresh/);
   assert.match(frame, /I guidelines\s+\? key bindings\s+q quit/);
 });
 
 test("status bar makes the key binding command discoverable", () => {
-  assert.match(stripAnsi(renderFrame(fixtureState(), 100, 8).at(-1) ?? ""), /\| \? keys/);
+  const status = stripAnsi(renderFrame(fixtureState(), 100, 8).at(-1) ?? "");
+  assert.match(status, /\| s source/);
+  assert.match(status, /\| \? keys/);
   const opened = update(fixtureState(), { kind: "key", key: "?" }).state;
   assert.deepEqual(opened.mode, { kind: "overlay", which: "help" });
 });
@@ -1564,6 +1567,152 @@ test("review guidelines are visible in a dedicated overlay from every tab", () =
   assert.match(frame, /Check boundaries\./);
 });
 
+test("source selector filters choices and atomically preserves presentation state while switching", () => {
+  const sessionId = unwrap(checkedSessionId("state-test-session"));
+  const stagedRequest = { source: { kind: "staged" as const }, historyMode: "squashed" as const };
+  const base = fixtureState({
+    activeTab: "review",
+    focusedPane: "tree",
+    renderMode: "native",
+    wrapLines: false,
+    tintMode: "off",
+    viewport: viewportFromSize(132, 41)
+  });
+  const opened = update(base, { kind: "key", key: "s" });
+  assert.equal(opened.state.mode.kind, "sourceLoading");
+  assert.deepEqual(opened.effects, [{ kind: "openSourceSelector", token: 1 }]);
+
+  const options = [
+    {
+      id: "session",
+      label: "Session patches",
+      description: "connected",
+      family: "session" as const,
+      choice: {
+        kind: "request" as const,
+        request: { source: { kind: "session" as const, sessionId }, historyMode: "squashed" as const },
+        selectHistory: false
+      }
+    },
+    {
+      id: "staged",
+      label: "Git: staged only",
+      description: "HEAD to INDEX",
+      family: "git" as const,
+      choice: { kind: "request" as const, request: stagedRequest, selectHistory: false }
+    }
+  ];
+  let selecting = update(opened.state, { kind: "sourceSelectorOpened", token: 1, options, selected: 1 }).state;
+  selecting = update(selecting, { kind: "sourceTextInput", text: "stage" }).state;
+  assert.match(stripAnsi(renderFrame(selecting, 100, 12).join("\n")), /> Git: staged only/);
+  const loading = update(selecting, { kind: "key", key: "Enter" });
+  assert.deepEqual(loading.effects, [{ kind: "switchSource", token: 1, request: stagedRequest }]);
+
+  const next = fixtureState({
+    dataset: {
+      source: { kind: "staged", base: "HEAD", head: "INDEX" },
+      historyMode: "squashed",
+      fingerprint: hashReviewSource({ staged: true }),
+      documents: [],
+      commits: []
+    },
+    files: [],
+    patches: [],
+    annotations: [],
+    activeTab: "narrative",
+    renderMode: "syntax",
+    wrapLines: true,
+    tintMode: "gradient"
+  });
+  const switched = update(loading.state, { kind: "sourceSwitchSucceeded", token: 1, request: stagedRequest, next }).state;
+  assert.equal(switched.dataset.source.kind, "staged");
+  assert.equal(switched.activeTab, "diff");
+  assert.equal(switched.focusedPane, "tree");
+  assert.equal(switched.renderMode, "native");
+  assert.equal(switched.wrapLines, false);
+  assert.equal(switched.tintMode, "off");
+  assert.deepEqual(switched.viewport, viewportFromSize(132, 41));
+  assert.deepEqual(switched.sourceNavigation.lastSession, base.sourceNavigation.active);
+  assert.deepEqual(switched.sourceNavigation.lastGit, stagedRequest);
+  assert.equal(switched.mode.kind, "normal");
+  assert.equal(JSON.stringify(switched).includes(String(base.dataset.fingerprint)), false);
+});
+
+test("source loading cancellation ignores late results and Git refresh rematerializes the active descriptor", () => {
+  const stagedRequest = { source: { kind: "staged" as const }, historyMode: "squashed" as const };
+  const staged = fixtureState({
+    dataset: {
+      source: { kind: "staged", base: "HEAD", head: "INDEX" },
+      historyMode: "squashed",
+      fingerprint: hashReviewSource({ staged: "current" }),
+      documents: [],
+      commits: []
+    },
+    sourceNavigation: { active: stagedRequest, lastSession: fixtureState().sourceNavigation.active, lastGit: stagedRequest }
+  });
+  const refreshing = update(staged, { kind: "key", key: "r" });
+  assert.equal(refreshing.state.mode.kind, "sourceLoading");
+  assert.deepEqual(refreshing.effects, [{ kind: "switchSource", token: 1, request: stagedRequest }]);
+
+  const cancelled = update(refreshing.state, { kind: "key", key: "Escape" }).state;
+  const late = update(cancelled, {
+    kind: "sourceSwitchSucceeded",
+    token: 1,
+    request: stagedRequest,
+    next: fixtureState({ files: [] })
+  }).state;
+  assert.equal(late.dataset.fingerprint, staged.dataset.fingerprint);
+  assert.equal(late.files.length, staged.files.length);
+  assert.equal(late.statusMessage, "Source switch cancelled");
+});
+
+test("source materialization failure rolls back to the complete prior dataset", () => {
+  const before = fixtureState({
+    selectedFile: 0,
+    scrollTop: { tree: 3, diff: 4 },
+    statusMessage: "before"
+  });
+  const opened = update(before, { kind: "key", key: "s" }).state;
+  const failed = update(opened, { kind: "sourceSwitchFailed", token: 1, message: "git failed" }).state;
+  assert.equal(failed.dataset, before.dataset);
+  assert.equal(failed.files, before.files);
+  assert.equal(failed.annotations, before.annotations);
+  assert.deepEqual(failed.scrollTop, before.scrollTop);
+  assert.equal(failed.mode.kind, "normal");
+  assert.equal(failed.statusMessage, "Source switch failed: git failed");
+});
+
+test("source selector collects a commit range and an explicit history mode", () => {
+  const opened = update(fixtureState(), { kind: "key", key: "s" }).state;
+  const selecting = update(opened, {
+    kind: "sourceSelectorOpened",
+    token: 1,
+    selected: 0,
+    options: [{
+      id: "range",
+      label: "Git range...",
+      description: "base..head",
+      family: "git",
+      choice: { kind: "input", input: "commitRange" }
+    }]
+  }).state;
+  let state = update(selecting, { kind: "key", key: "Enter" }).state;
+  assert.equal(state.mode.kind, "sourceInput");
+  state = update(state, { kind: "sourceTextInput", text: "main..HEAD" }).state;
+  state = update(state, { kind: "key", key: "Enter" }).state;
+  assert.equal(state.mode.kind, "sourceHistory");
+  state = update(state, { kind: "key", key: "ArrowDown" }).state;
+  const loading = update(state, { kind: "key", key: "Enter" });
+  assert.deepEqual(loading.effects, [{
+    kind: "switchSource",
+    token: 1,
+    request: {
+      source: { kind: "commitRange", baseExclusive: "main", headInclusive: "HEAD" },
+      historyMode: "perCommit"
+    }
+  }]);
+});
+
 test("generic Git diffs do not claim session provenance", () => {
   initTheme("dark");
   const sessionState = fixtureState({ patches: [] });
@@ -1580,9 +1729,10 @@ test("generic Git diffs do not claim session provenance", () => {
       commits: []
     }
   });
-  const branchFrame = stripAnsi(renderFrame(branchState, 90, 8).join("\n"));
+  const branchFrame = stripAnsi(renderFrame(branchState, 120, 8).join("\n"));
   assert.doesNotMatch(branchFrame, /~/);
   assert.doesNotMatch(branchFrame, /tint:/);
+  assert.match(branchFrame, /main\.\.HEAD · hist:per-commit/);
 });
 
 test("analysis tabs render persisted results, browse runs, and wheel-scroll independently", () => {
@@ -1659,6 +1809,12 @@ function fixtureState(overrides: Partial<AppState> = {}): AppState {
     mode: { kind: "normal" },
     selection: null,
     statusMessage: null,
+    sourceNavigation: {
+      active: { source: { kind: "session", sessionId }, historyMode: "squashed" },
+      lastSession: { source: { kind: "session", sessionId }, historyMode: "squashed" },
+      lastGit: null
+    },
+    sourceRequestSeq: 0,
     ...overrides
   };
 }

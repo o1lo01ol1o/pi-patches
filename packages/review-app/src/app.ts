@@ -22,6 +22,7 @@ import { diffRow } from "./render/coords.ts";
 import { buildDatasetHistoryEntries } from "./render/dataset-history.ts";
 import { fileStateFromContent, update, viewportFromSize, type AppState, type DbSnapshot } from "./state.ts";
 import { materializeSessionSource } from "./sources/session.ts";
+import { inspectRequestFromSource, sourceFamily, type InspectRequest } from "./sources/selector.ts";
 
 export function loadAppState(store: PatchStore, session: SessionRecord): Result<AppState> {
   const snapshot = loadDbSnapshot(store, session);
@@ -30,6 +31,7 @@ export function loadAppState(store: PatchStore, session: SessionRecord): Result<
   if (!dataset.ok) return dataset;
   const runs = store.listAnalysisRuns(dataset.value.fingerprint);
   if (!runs.ok) return runs;
+  const sourceRequest = inspectRequestFromSource(dataset.value.source, dataset.value.historyMode);
   return ok({
     session,
     dataset: dataset.value,
@@ -60,11 +62,18 @@ export function loadAppState(store: PatchStore, session: SessionRecord): Result<
     pendingKey: null,
     mode: { kind: "normal" },
     selection: null,
-    statusMessage: null
+    statusMessage: null,
+    sourceNavigation: initialSourceNavigation(sourceRequest),
+    sourceRequestSeq: 0
   });
 }
 
-export function loadDatasetAppState(store: PatchStore, session: SessionRecord, dataset: ReviewDataset): Result<AppState> {
+export function loadDatasetAppState(
+  store: PatchStore,
+  session: SessionRecord,
+  dataset: ReviewDataset,
+  selectedRequest: InspectRequest = inspectRequestFromSource(dataset.source, dataset.historyMode)
+): Result<AppState> {
   if (dataset.source.kind === "session" && dataset.source.sessionId === session.id) return loadAppState(store, session);
   const files = datasetFiles(session, dataset.documents);
   if (!files.ok) return files;
@@ -102,8 +111,19 @@ export function loadDatasetAppState(store: PatchStore, session: SessionRecord, d
     pendingKey: null,
     mode: { kind: "normal" },
     selection: null,
-    statusMessage: null
+    statusMessage: null,
+    sourceNavigation: initialSourceNavigation(selectedRequest),
+    sourceRequestSeq: 0
   });
+}
+
+function initialSourceNavigation(request: InspectRequest): AppState["sourceNavigation"] {
+  const family = sourceFamily(request);
+  return {
+    active: request,
+    lastSession: family === "session" ? request : null,
+    lastGit: family === "git" ? request : null
+  };
 }
 
 export function loadSourceAnnotations(

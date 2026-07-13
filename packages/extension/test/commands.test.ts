@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { spawnSync } from "node:child_process";
 import { test } from "node:test";
 import type { ExtensionAPI, ExtensionContext, SessionShutdownEvent, SessionStartEvent, ToolCallEvent, ToolResultEvent } from "@earendil-works/pi-coding-agent";
 import { checkedSessionId, ok, type Result, type SessionId } from "@pi-patches/store";
@@ -84,6 +85,33 @@ test("/patches inspect materializes a direct source and opens it in the embedded
     await fixture.command("patches").handler("inspect snapshot snapshot.txt", fixture.ctx);
 
     assert.equal(fixture.customUiCalls, 1);
+    assert.deepEqual(fixture.notifications, []);
+  } finally {
+    await fixture.shutdown();
+    fixture.cleanup();
+  }
+});
+
+test("/patches inspect exposes distinct staged and unstaged Git sources", async () => {
+  const fixture = makeCommandFixture("commands-git-sources-session");
+  try {
+    registerRecorder(fixture.pi);
+    registerCommands(fixture.pi);
+    await fixture.emit("session_start", sessionStart("startup"));
+    gitCommand(fixture.dir, "init", "-b", "main");
+    gitCommand(fixture.dir, "config", "user.email", "pi-patches@example.test");
+    gitCommand(fixture.dir, "config", "user.name", "Pi Patches Test");
+    writeText(join(fixture.dir, "tracked.txt"), "head\n");
+    gitCommand(fixture.dir, "add", "tracked.txt");
+    gitCommand(fixture.dir, "commit", "-m", "base");
+    writeText(join(fixture.dir, "tracked.txt"), "index\n");
+    gitCommand(fixture.dir, "add", "tracked.txt");
+    writeText(join(fixture.dir, "tracked.txt"), "worktree\n");
+
+    await fixture.command("patches").handler("inspect staged", fixture.ctx);
+    await fixture.command("patches").handler("inspect unstaged", fixture.ctx);
+
+    assert.equal(fixture.customUiCalls, 2);
     assert.deepEqual(fixture.notifications, []);
   } finally {
     await fixture.shutdown();
@@ -335,6 +363,12 @@ function writeResult(toolCallId: string, path: string, content: string): ToolRes
 function writeText(path: string, content: string): void {
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, content);
+}
+
+function gitCommand(cwd: string, ...args: string[]): string {
+  const result = spawnSync("git", args, { cwd, encoding: "utf8" });
+  if (result.status !== 0) throw new Error(`git ${args.join(" ")}: ${result.stderr}`);
+  return result.stdout;
 }
 
 function unwrap<T>(result: Result<T>): T {

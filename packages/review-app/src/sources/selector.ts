@@ -1,8 +1,10 @@
-import { err, ok, type HistoryMode, type Result, type SessionId } from "@pi-patches/store";
+import { canonicalJson, err, ok, type HistoryMode, type Result, type ReviewSource, type SessionId } from "@pi-patches/store";
 
 export type InspectSourceRequest =
   | { kind: "session"; sessionId: SessionId | null }
   | { kind: "workingTree" }
+  | { kind: "staged" }
+  | { kind: "unstaged" }
   | { kind: "branch"; baseRef: string; headRef: string }
   | { kind: "commit"; sha: string }
   | { kind: "commitRange"; baseExclusive: string; headInclusive: string }
@@ -14,10 +16,27 @@ export type InspectRequest = {
   historyMode: HistoryMode;
 };
 
-export type SourcePreset = "session" | "workingTree" | "baseBranch" | "commitRange" | "pullRequest" | "snapshot";
+export type SourceFamily = "session" | "git" | "snapshot";
+export type SourceInputKind = "commitRange" | "pullRequest" | "snapshot";
+
+export type SourceSelectorChoice =
+  | { kind: "request"; request: InspectRequest; selectHistory: boolean }
+  | { kind: "input"; input: SourceInputKind };
+
+export type SourceSelectorOption = {
+  id: string;
+  label: string;
+  description: string;
+  family: SourceFamily;
+  choice: SourceSelectorChoice;
+};
+
+export type SourcePreset = "session" | "workingTree" | "staged" | "unstaged" | "baseBranch" | "commitRange" | "pullRequest" | "snapshot";
 export const sourcePresetOrder: readonly SourcePreset[] = [
   "session",
   "workingTree",
+  "staged",
+  "unstaged",
   "baseBranch",
   "commitRange",
   "pullRequest",
@@ -54,6 +73,10 @@ export function parseInspectArgs(input: string): Result<InspectRequest | null> {
     case "working-tree":
     case "workingTree":
       return rest.length === 0 ? ok({ source: { kind: "workingTree" }, historyMode }) : usage("working-tree");
+    case "staged":
+      return rest.length === 0 ? ok({ source: { kind: "staged" }, historyMode }) : usage("staged");
+    case "unstaged":
+      return rest.length === 0 ? ok({ source: { kind: "unstaged" }, historyMode }) : usage("unstaged");
     case "branch":
       return rest.length === 1 || rest.length === 2
         ? ok({ source: { kind: "branch", baseRef: rest[0], headRef: rest[1] ?? "HEAD" }, historyMode })
@@ -100,6 +123,45 @@ export function smartPreselection(input: {
   if (input.workingTreeHasChanges) return "workingTree";
   if (input.onNonDefaultBranch) return "baseBranch";
   return "commitRange";
+}
+
+export function inspectRequestFromSource(source: ReviewSource, historyMode: HistoryMode): InspectRequest {
+  switch (source.kind) {
+    case "session": return { source: { kind: "session", sessionId: source.sessionId }, historyMode };
+    case "workingTree": return { source: { kind: "workingTree" }, historyMode };
+    case "staged": return { source: { kind: "staged" }, historyMode };
+    case "unstaged": return { source: { kind: "unstaged" }, historyMode };
+    case "branch": return { source: { kind: "branch", baseRef: source.baseRef, headRef: source.headRef }, historyMode };
+    case "commit": return { source: { kind: "commit", sha: source.sha }, historyMode };
+    case "commitRange": return {
+      source: { kind: "commitRange", baseExclusive: source.baseExclusive, headInclusive: source.headInclusive },
+      historyMode
+    };
+    case "pullRequest": return { source: { kind: "pullRequest", number: source.number }, historyMode };
+    case "snapshot": return { source: { kind: "snapshot", paths: source.paths }, historyMode };
+  }
+}
+
+export function inspectRequestKey(request: InspectRequest): string {
+  return canonicalJson(request);
+}
+
+export function sourceFamily(request: InspectRequest): SourceFamily {
+  if (request.source.kind === "session") return "session";
+  if (request.source.kind === "snapshot") return "snapshot";
+  return "git";
+}
+
+export function filterSourceOptions(options: readonly SourceSelectorOption[], query: string): SourceSelectorOption[] {
+  return fuzzyFilter(
+    options.map((option) => ({
+      id: option.id,
+      label: option.label,
+      description: option.description,
+      value: option
+    })),
+    query
+  ).map((option) => option.value);
 }
 
 function fuzzyScore(candidate: string, query: string): number | null {

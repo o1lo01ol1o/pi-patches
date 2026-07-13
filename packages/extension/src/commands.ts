@@ -55,7 +55,7 @@ export function registerCommands(pi: ExtensionAPI, overrides: Partial<CommandDep
             ctx.ui.notify("Usage: /patches connect <session-id-or-prefix>", "warning");
             return;
           }
-          await connectReview(ctx, state.dbPath, rest);
+          await connectReview(ctx, state.dbPath, rest, dependencies.commandRunner);
           return;
         }
         if (command === "inspect") {
@@ -86,7 +86,7 @@ export function registerCommands(pi: ExtensionAPI, overrides: Partial<CommandDep
   });
 }
 
-async function connectReview(ctx: ExtensionContext, dbPath: string, selector: string): Promise<void> {
+async function connectReview(ctx: ExtensionContext, dbPath: string, selector: string, commandRunner: CommandRunner): Promise<void> {
   const discovery = discover({ db: dbPath, session: selector, list: false, help: false });
   if (!discovery.ok) {
     ctx.ui.notify(`pi-patches: ${errorMessage(discovery.error)}`, "warning");
@@ -109,7 +109,7 @@ async function connectReview(ctx: ExtensionContext, dbPath: string, selector: st
     return;
   }
   try {
-    await openReview(ctx, discovery.value, initialState.value);
+    await openReview(ctx, discovery.value, initialState.value, undefined, commandRunner);
   } finally {
     discovery.value.store.close();
   }
@@ -146,13 +146,13 @@ async function inspectReview(ctx: ExtensionContext, dbPath: string, args: string
       ctx.ui.notify(`pi-patches: ${errorMessage(dataset.error)}`, "error");
       return;
     }
-    const state = loadDatasetAppState(discovery.value.store, discovery.value.session, dataset.value);
+    const state = loadDatasetAppState(discovery.value.store, discovery.value.session, dataset.value, request.value);
     if (!state.ok) {
       ctx.ui.notify(`pi-patches: ${errorMessage(state.error)}`, "error");
       return;
     }
     if (!attachReviewGuidelines(ctx, state.value)) return;
-    await openReview(ctx, discovery.value, state.value);
+    await openReview(ctx, discovery.value, state.value, undefined, dependencies.commandRunner);
   } finally {
     discovery.value.store.close();
   }
@@ -210,7 +210,7 @@ async function analyzeReview(ctx: ExtensionContext, dbPath: string, args: string
           ...(focus === undefined ? {} : { focus }),
           guidelines: guidelines.value?.contents ?? null
         };
-    const state = loadDatasetAppState(discovery.value.store, discovery.value.session, dataset.value);
+    const state = loadDatasetAppState(discovery.value.store, discovery.value.session, dataset.value, sourceRequest);
     if (!state.ok) {
       ctx.ui.notify(`pi-patches: ${errorMessage(state.error)}`, "error");
       return;
@@ -228,7 +228,7 @@ async function analyzeReview(ctx: ExtensionContext, dbPath: string, args: string
             }
           }
         : {})
-    });
+    }, dependencies.commandRunner);
   } finally {
     discovery.value.store.close();
   }
@@ -264,6 +264,10 @@ async function requestForPreset(ctx: ExtensionContext, preset: SourcePreset, ses
       return okInspect({ source: { kind: "session", sessionId }, historyMode: "squashed" });
     case "workingTree":
       return okInspect({ source: { kind: "workingTree" }, historyMode: "squashed" });
+    case "staged":
+      return okInspect({ source: { kind: "staged" }, historyMode: "squashed" });
+    case "unstaged":
+      return okInspect({ source: { kind: "unstaged" }, historyMode: "squashed" });
     case "baseBranch": {
       const branches = listBranches(ctx.cwd, commandRunner);
       if (!branches.ok) return branches;
@@ -343,11 +347,17 @@ async function openReview(
   ctx: ExtensionContext,
   discovery: import("@pi-patches/store").Discovery,
   state: import("@pi-patches/review-app/app").AppState,
-  analysis?: PendingAnalysis
+  analysis: PendingAnalysis | undefined,
+  commandRunner: CommandRunner
 ): Promise<void> {
   await ctx.ui.custom(
     (tui, _theme, _keybindings, done) =>
-      createReviewComponent(tui, discovery, state, () => done(undefined), { reservedRows: 0, analysis }),
+      createReviewComponent(tui, discovery, state, () => done(undefined), {
+        reservedRows: 0,
+        analysis,
+        sourceCwd: ctx.cwd,
+        sourceCommandRunner: commandRunner
+      }),
     {
       overlay: true,
       overlayOptions: { width: "100%", maxHeight: "100%", anchor: "top-left", margin: 0 }
@@ -374,6 +384,8 @@ function presetLabel(preset: SourcePreset): string {
   switch (preset) {
     case "session": return "Session";
     case "workingTree": return "Working tree";
+    case "staged": return "Staged";
+    case "unstaged": return "Unstaged";
     case "baseBranch": return "Base branch";
     case "commitRange": return "Commit or range";
     case "pullRequest": return "Pull request";

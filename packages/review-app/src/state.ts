@@ -1,5 +1,6 @@
 import {
   currentLine,
+  errorMessage,
   hashContent,
   type Anchor,
   type Annotation,
@@ -32,6 +33,14 @@ import {
 import { fileIndexAtTreeRow, fileTreeRowCount, treeRowForFileIndex } from "./render/file-tree-model.ts";
 import { buildPatchFileSnapshot } from "./render/patch-snapshot.ts";
 import { mapRangeThroughPatches, mapRangeThroughTexts, patchesAfterAnchor, type LineRange } from "./render/reanchor.ts";
+import {
+  filterSourceOptions,
+  parseInspectArgs,
+  sourceFamily,
+  type InspectRequest,
+  type SourceInputKind,
+  type SourceSelectorOption
+} from "./sources/selector.ts";
 
 export type FileState = {
   row: FileRecord;
@@ -85,6 +94,10 @@ export type Mode =
   | { kind: "comment"; target: CommentTarget; initialText: string; role: ReviewNoteRole }
   | { kind: "finish"; selected: 0 | 1 | 2 | 3; freshAgent: number; staleAgent: number; humanNotes: number }
   | { kind: "overlay"; which: "help" | "annotations" | "guidelines" }
+  | { kind: "sourceSelector"; token: number; options: readonly SourceSelectorOption[]; query: string; selected: number }
+  | { kind: "sourceInput"; token: number; input: SourceInputKind; text: string }
+  | { kind: "sourceHistory"; token: number; request: InspectRequest; selected: 0 | 1 }
+  | { kind: "sourceLoading"; token: number; operation: "listing" | "switching" | "refreshing"; label: string }
   | {
       kind: "analysisRunning";
       analysisMode: AnalysisMode;
@@ -94,6 +107,12 @@ export type Mode =
       message: string;
       outputTail: string;
     };
+
+export type SourceNavigation = {
+  active: InspectRequest;
+  lastSession: InspectRequest | null;
+  lastGit: InspectRequest | null;
+};
 
 export type AppState = {
   session: SessionRecord;
@@ -126,13 +145,15 @@ export type AppState = {
   mode: Mode;
   selection: { anchor: DiffRow; head: DiffRow } | null;
   statusMessage: string | null;
+  sourceNavigation: SourceNavigation;
+  sourceRequestSeq: number;
 };
 
 export type AppKey =
   | "q" | "r" | "tab" | "h" | "l" | "Enter" | "H" | "d" | "t" | "n" | "p" | "f"
   | "g" | "G" | "ctrl+e" | "ctrl+y" | "{" | "}" | "?" | "a" | "S" | "c" | "v"
   | "j" | "ArrowDown" | "k" | "ArrowUp" | "ctrl+d" | "ctrl+u" | "]" | "[" | "Escape"
-  | "y" | "e" | "x" | "u" | "I" | "ctrl+s" | "Backspace" | "1" | "2" | "3" | "4" | "w";
+  | "y" | "e" | "x" | "u" | "I" | "s" | "ctrl+s" | "Backspace" | "1" | "2" | "3" | "4" | "w";
 
 export type AppEvent =
   | { kind: "key"; key: AppKey }
@@ -153,6 +174,10 @@ export type AppEvent =
     }
   | { kind: "analysisFinished"; run: AnalysisRun }
   | { kind: "analysisFailed"; message: string }
+  | { kind: "sourceTextInput"; text: string }
+  | { kind: "sourceSelectorOpened"; token: number; options: readonly SourceSelectorOption[]; selected: number }
+  | { kind: "sourceSwitchSucceeded"; token: number; request: InspectRequest; next: AppState }
+  | { kind: "sourceSwitchFailed"; token: number; message: string }
   | { kind: "resize"; cols: number; rows: number }
   | { kind: "animationTick" }
   | { kind: "tick" };
@@ -166,6 +191,8 @@ export type Effect =
   | { kind: "updateAnnotationRole"; annotationId: AnnotationId; role: ReviewNoteRole }
   | { kind: "reanchorAnnotation"; annotationId: AnnotationId; anchor: Anchor; snippet: string }
   | { kind: "deleteAnnotation"; annotationId: AnnotationId }
+  | { kind: "openSourceSelector"; token: number }
+  | { kind: "switchSource"; token: number; request: InspectRequest }
   | { kind: "cancelAnalysis" };
 
 export function update(state: AppState, event: AppEvent): { state: AppState; effects: Effect[] } {
@@ -175,6 +202,10 @@ export function update(state: AppState, event: AppEvent): { state: AppState; eff
   if (event.kind === "dbChanged") return applyDbSnapshot(state, event.snapshot);
   if (event.kind === "fileChanged") return applyFileChanged(state, event.path, event.content);
   if (event.kind === "analysisRunsChanged") return applyAnalysisRuns(state, event.runs);
+  if (event.kind === "sourceTextInput") return updateSourceTextInput(state, event.text);
+  if (event.kind === "sourceSelectorOpened") return applySourceSelectorOpened(state, event);
+  if (event.kind === "sourceSwitchSucceeded") return applySourceSwitchSucceeded(state, event);
+  if (event.kind === "sourceSwitchFailed") return applySourceSwitchFailed(state, event);
   if (event.kind === "analysisStarted") {
     return {
       state: {
@@ -214,6 +245,16 @@ export function update(state: AppState, event: AppEvent): { state: AppState; eff
         return { state: { ...state, mode: { kind: "normal" } }, effects: [] };
       }
       return { state, effects: [] };
+    case "sourceSelector":
+      return updateSourceSelector(state, event.key);
+    case "sourceInput":
+      return updateSourceInput(state, event.key);
+    case "sourceHistory":
+      return updateSourceHistory(state, event.key);
+    case "sourceLoading":
+      return event.key === "Escape"
+        ? { state: { ...state, mode: { kind: "normal" }, statusMessage: "Source switch cancelled" }, effects: [] }
+        : { state, effects: [] };
     case "analysisRunning":
       if (event.key === "Escape" || event.key === "q") {
         return {
@@ -247,12 +288,13 @@ export function update(state: AppState, event: AppEvent): { state: AppState; eff
       ? { state: { ...state, statusMessage: "No REVIEW_GUIDELINES.md for this project" }, effects: [] }
       : { state: { ...state, mode: { kind: "overlay", which: "guidelines" } }, effects: [] };
   }
+  if (event.key === "s") return openSourceSelector(state);
   if (state.activeTab !== "diff") return updateNonDiffTab(state, event.key);
   switch (event.key) {
     case "q":
       return openFinishSelector(state);
     case "r":
-      return { state, effects: [{ kind: "refresh" }] };
+      return refreshSource(state);
     case "tab":
       return { state: { ...state, pendingKey: null, focusedPane: state.focusedPane === "tree" ? "diff" : "tree" }, effects: [] };
     case "h":
@@ -374,6 +416,261 @@ export function update(state: AppState, event: AppEvent): { state: AppState; eff
   }
 }
 
+function openSourceSelector(state: AppState): { state: AppState; effects: Effect[] } {
+  const token = state.sourceRequestSeq + 1;
+  return {
+    state: {
+      ...state,
+      sourceRequestSeq: token,
+      mode: { kind: "sourceLoading", token, operation: "listing", label: "Loading review sources" },
+      selection: null,
+      statusMessage: "Loading review sources"
+    },
+    effects: [{ kind: "openSourceSelector", token }]
+  };
+}
+
+function refreshSource(state: AppState): { state: AppState; effects: Effect[] } {
+  if (state.dataset.source.kind === "session") return { state, effects: [{ kind: "refresh" }] };
+  const token = state.sourceRequestSeq + 1;
+  const request = state.sourceNavigation.active;
+  return {
+    state: {
+      ...state,
+      sourceRequestSeq: token,
+      mode: { kind: "sourceLoading", token, operation: "refreshing", label: `Refreshing ${sourceRequestLabel(request)}` },
+      statusMessage: `Refreshing ${sourceRequestLabel(request)}`
+    },
+    effects: [{ kind: "switchSource", token, request }]
+  };
+}
+
+function applySourceSelectorOpened(
+  state: AppState,
+  event: Extract<AppEvent, { kind: "sourceSelectorOpened" }>
+): { state: AppState; effects: Effect[] } {
+  if (state.mode.kind !== "sourceLoading" || state.mode.token !== event.token || state.mode.operation !== "listing") {
+    return { state, effects: [] };
+  }
+  return {
+    state: {
+      ...state,
+      mode: {
+        kind: "sourceSelector",
+        token: event.token,
+        options: event.options,
+        query: "",
+        selected: clamp(event.selected, 0, Math.max(0, event.options.length - 1))
+      },
+      statusMessage: event.options.length === 0 ? "No review sources available" : "Type to filter; Enter switches; Esc cancels"
+    },
+    effects: []
+  };
+}
+
+function updateSourceSelector(state: AppState, key: AppKey): { state: AppState; effects: Effect[] } {
+  if (state.mode.kind !== "sourceSelector") return { state, effects: [] };
+  const mode = state.mode;
+  const visible = filterSourceOptions(mode.options, mode.query);
+  if (key === "Escape" || key === "q") {
+    return { state: { ...state, mode: { kind: "normal" }, statusMessage: "Source switch cancelled" }, effects: [] };
+  }
+  if (key === "Backspace") {
+    return {
+      state: { ...state, mode: { ...mode, query: mode.query.slice(0, -1), selected: 0 } },
+      effects: []
+    };
+  }
+  if (key === "ArrowDown" || key === "ctrl+d") {
+    return {
+      state: { ...state, mode: { ...mode, selected: clamp(mode.selected + 1, 0, Math.max(0, visible.length - 1)) } },
+      effects: []
+    };
+  }
+  if (key === "ArrowUp" || key === "ctrl+u") {
+    return {
+      state: { ...state, mode: { ...mode, selected: clamp(mode.selected - 1, 0, Math.max(0, visible.length - 1)) } },
+      effects: []
+    };
+  }
+  if (key !== "Enter") return { state, effects: [] };
+  const option = visible[mode.selected];
+  if (!option) return { state, effects: [] };
+  if (option.choice.kind === "input") {
+    return {
+      state: {
+        ...state,
+        mode: { kind: "sourceInput", token: mode.token, input: option.choice.input, text: "" },
+        statusMessage: sourceInputPrompt(option.choice.input)
+      },
+      effects: []
+    };
+  }
+  if (option.choice.selectHistory) {
+    return {
+      state: {
+        ...state,
+        mode: {
+          kind: "sourceHistory",
+          token: mode.token,
+          request: option.choice.request,
+          selected: option.choice.request.historyMode === "perCommit" ? 1 : 0
+        },
+        statusMessage: "Choose squashed or per-commit history"
+      },
+      effects: []
+    };
+  }
+  return beginSourceSwitch(state, mode.token, option.choice.request);
+}
+
+function updateSourceTextInput(state: AppState, text: string): { state: AppState; effects: Effect[] } {
+  if (text.length === 0 || [...text].some((character) => character < " ")) return { state, effects: [] };
+  if (state.mode.kind === "sourceSelector") {
+    return {
+      state: { ...state, mode: { ...state.mode, query: `${state.mode.query}${text}`, selected: 0 } },
+      effects: []
+    };
+  }
+  if (state.mode.kind === "sourceInput") {
+    return {
+      state: { ...state, mode: { ...state.mode, text: `${state.mode.text}${text}` } },
+      effects: []
+    };
+  }
+  return { state, effects: [] };
+}
+
+function updateSourceInput(state: AppState, key: AppKey): { state: AppState; effects: Effect[] } {
+  if (state.mode.kind !== "sourceInput") return { state, effects: [] };
+  const mode = state.mode;
+  if (key === "Escape") return { state: { ...state, mode: { kind: "normal" }, statusMessage: "Source switch cancelled" }, effects: [] };
+  if (key === "Backspace") return { state: { ...state, mode: { ...mode, text: mode.text.slice(0, -1) } }, effects: [] };
+  if (key !== "Enter") return { state, effects: [] };
+  const parsed = parseSourceInput(mode.input, mode.text);
+  if (!parsed.ok || parsed.value === null) {
+    const message = parsed.ok ? "Source input is required" : errorMessage(parsed.error);
+    return { state: { ...state, statusMessage: message }, effects: [] };
+  }
+  const request = parsed.value;
+  const selectHistory = request.source.kind === "commitRange" || request.source.kind === "pullRequest";
+  return selectHistory
+    ? {
+        state: {
+          ...state,
+          mode: { kind: "sourceHistory", token: mode.token, request, selected: 0 },
+          statusMessage: "Choose squashed or per-commit history"
+        },
+        effects: []
+      }
+    : beginSourceSwitch(state, mode.token, request);
+}
+
+function updateSourceHistory(state: AppState, key: AppKey): { state: AppState; effects: Effect[] } {
+  if (state.mode.kind !== "sourceHistory") return { state, effects: [] };
+  const mode = state.mode;
+  if (key === "Escape") return { state: { ...state, mode: { kind: "normal" }, statusMessage: "Source switch cancelled" }, effects: [] };
+  if (key === "ArrowDown" || key === "ArrowUp" || key === "j" || key === "k") {
+    return { state: { ...state, mode: { ...mode, selected: mode.selected === 0 ? 1 : 0 } }, effects: [] };
+  }
+  if (key !== "Enter") return { state, effects: [] };
+  return beginSourceSwitch(state, mode.token, {
+    ...mode.request,
+    historyMode: mode.selected === 0 ? "squashed" : "perCommit"
+  });
+}
+
+function beginSourceSwitch(
+  state: AppState,
+  token: number,
+  request: InspectRequest
+): { state: AppState; effects: Effect[] } {
+  const label = sourceRequestLabel(request);
+  return {
+    state: {
+      ...state,
+      mode: { kind: "sourceLoading", token, operation: "switching", label: `Loading ${label}` },
+      statusMessage: `Loading ${label}`
+    },
+    effects: [{ kind: "switchSource", token, request }]
+  };
+}
+
+function applySourceSwitchSucceeded(
+  state: AppState,
+  event: Extract<AppEvent, { kind: "sourceSwitchSucceeded" }>
+): { state: AppState; effects: Effect[] } {
+  if (state.mode.kind !== "sourceLoading" || state.mode.token !== event.token) return { state, effects: [] };
+  const refreshed = state.mode.operation === "refreshing";
+  const family = sourceFamily(event.request);
+  const navigation: SourceNavigation = {
+    active: event.request,
+    lastSession: family === "session" ? event.request : state.sourceNavigation.lastSession,
+    lastGit: family === "git" ? event.request : state.sourceNavigation.lastGit
+  };
+  return {
+    state: {
+      ...event.next,
+      activeTab: "diff",
+      viewport: state.viewport,
+      focusedPane: state.focusedPane,
+      renderMode: state.renderMode,
+      wrapLines: state.wrapLines,
+      tintMode: state.tintMode,
+      colorDepth: state.colorDepth,
+      tintTheme: state.tintTheme,
+      reviewGuidelines: state.reviewGuidelines,
+      sourceNavigation: navigation,
+      sourceRequestSeq: state.sourceRequestSeq,
+      mode: { kind: "normal" },
+      statusMessage: `${refreshed ? "Refreshed" : "Switched to"} ${sourceRequestLabel(event.request)}`
+    },
+    effects: []
+  };
+}
+
+function applySourceSwitchFailed(
+  state: AppState,
+  event: Extract<AppEvent, { kind: "sourceSwitchFailed" }>
+): { state: AppState; effects: Effect[] } {
+  if (state.mode.kind !== "sourceLoading" || state.mode.token !== event.token) return { state, effects: [] };
+  return {
+    state: { ...state, mode: { kind: "normal" }, statusMessage: `Source switch failed: ${event.message}` },
+    effects: []
+  };
+}
+
+function parseSourceInput(input: SourceInputKind, text: string) {
+  switch (input) {
+    case "commitRange": return parseInspectArgs(`range ${text}`);
+    case "pullRequest": return parseInspectArgs(`pr ${text}`);
+    case "snapshot": return parseInspectArgs(`snapshot ${text}`);
+  }
+}
+
+function sourceInputPrompt(input: SourceInputKind): string {
+  switch (input) {
+    case "commitRange": return "Enter commit range: base..head";
+    case "pullRequest": return "Enter pull request number";
+    case "snapshot": return "Enter snapshot paths (quotes supported)";
+  }
+}
+
+function sourceRequestLabel(request: InspectRequest): string {
+  const source = request.source;
+  switch (source.kind) {
+    case "session": return `session ${source.sessionId ?? "current"}`;
+    case "workingTree": return "complete working tree";
+    case "staged": return "staged HEAD..INDEX";
+    case "unstaged": return "unstaged INDEX..WORKTREE";
+    case "branch": return `branch ${source.baseRef}..${source.headRef}`;
+    case "commit": return `commit ${source.sha.slice(0, 8)}`;
+    case "commitRange": return `range ${source.baseExclusive}..${source.headInclusive}`;
+    case "pullRequest": return `PR #${source.number}`;
+    case "snapshot": return `snapshot ${source.paths.join(" ")}`;
+  }
+}
+
 function applyDbSnapshot(state: AppState, snapshot: DbSnapshot): { state: AppState; effects: Effect[] } {
   const previousTimeline = patchTimeline(state.patches);
   const nextTimeline = patchTimeline(snapshot.patches);
@@ -472,7 +769,7 @@ function applyAnalysisFinished(state: AppState, run: AnalysisRun): { state: AppS
 function updateNonDiffTab(state: AppState, key: AppKey): { state: AppState; effects: Effect[] } {
   if (state.activeTab === "diff") return { state, effects: [] };
   if (key === "q") return openFinishSelector(state);
-  if (key === "r") return { state, effects: [{ kind: "refresh" }] };
+  if (key === "r") return refreshSource(state);
   if (key === "?") return { state: { ...state, mode: { kind: "overlay", which: "help" } }, effects: [] };
   const tab = state.activeTab;
   if (key === "j" || key === "ArrowDown" || key === "ctrl+e") {
@@ -680,7 +977,15 @@ function finishIndex(value: number): 0 | 1 | 2 | 3 {
 }
 
 function updateMouse(state: AppState, mouse: MouseEvent, layout: FrameLayout): { state: AppState; effects: Effect[] } {
-  if (state.mode.kind === "comment" || state.mode.kind === "overlay" || state.mode.kind === "confirmSubmit" || state.mode.kind === "finish" || state.mode.kind === "analysisRunning") {
+  if (state.mode.kind === "comment" ||
+    state.mode.kind === "overlay" ||
+    state.mode.kind === "confirmSubmit" ||
+    state.mode.kind === "finish" ||
+    state.mode.kind === "analysisRunning" ||
+    state.mode.kind === "sourceSelector" ||
+    state.mode.kind === "sourceInput" ||
+    state.mode.kind === "sourceHistory" ||
+    state.mode.kind === "sourceLoading") {
     return { state, effects: [] };
   }
   const hit = hitTestFrame(layout, mouse.x, mouse.y);

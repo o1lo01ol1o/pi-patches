@@ -10,17 +10,21 @@ import {
   hashContent,
   ok,
   PatchStore,
+  type ReviewDocument,
   type Result
 } from "@pi-patches/store";
 import {
   fuzzyFilter,
+  buildSourceSelectorOptions,
   loadReviewGuidelines,
   materializeGitSource,
   materializePullRequest,
   materializeSessionSource,
   materializeSnapshot,
+  materializeWorkingDiff,
   materializeWorkingTree,
   parseInspectArgs,
+  selectedSourceOption,
   smartPreselection,
   sourcePresetOrder,
   systemCommandRunner,
@@ -74,6 +78,49 @@ test("working-tree source covers staged, unstaged, untracked, deleted, renamed, 
     assert.equal(documents.get("vendor/sub")?.kind, "submodule");
     assert.equal(result.commits.length, 0);
     assert.equal(result.source.kind, "workingTree");
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("staged and unstaged sources read distinct HEAD, index, and worktree bytes", () => {
+  const repo = makeRepo("staged-unstaged");
+  try {
+    write(repo, "both.txt", "head\n");
+    write(repo, "index-only.txt", "head index\n");
+    commitAll(repo, "base");
+
+    write(repo, "both.txt", "index\n");
+    write(repo, "index-only.txt", "index only\n");
+    git(repo, "add", "both.txt", "index-only.txt");
+    write(repo, "both.txt", "worktree\n");
+    write(repo, "untracked.txt", "untracked\n");
+
+    const staged = unwrap(materializeWorkingDiff(repo, "staged", "squashed", systemCommandRunner));
+    const unstaged = unwrap(materializeWorkingDiff(repo, "unstaged", "squashed", systemCommandRunner));
+    const complete = unwrap(materializeWorkingTree(repo, "squashed", systemCommandRunner));
+
+    assert.equal(staged.source.kind, "staged");
+    assert.equal(unstaged.source.kind, "unstaged");
+    assert.equal(complete.source.kind, "workingTree");
+    assert.deepEqual(staged.documents.map((document) => document.relPath), ["both.txt", "index-only.txt"]);
+    assert.deepEqual(unstaged.documents.map((document) => document.relPath), ["both.txt", "untracked.txt"]);
+    assert.deepEqual(complete.documents.map((document) => document.relPath), ["both.txt", "index-only.txt", "untracked.txt"]);
+
+    const stagedBoth = staged.documents.find((document) => document.relPath === "both.txt");
+    const unstagedBoth = unstaged.documents.find((document) => document.relPath === "both.txt");
+    const completeBoth = complete.documents.find((document) => document.relPath === "both.txt");
+    assert.deepEqual(textSides(stagedBoth), { baseline: "head\n", head: "index\n" });
+    assert.deepEqual(textSides(unstagedBoth), { baseline: "index\n", head: "worktree\n" });
+    assert.deepEqual(textSides(completeBoth), { baseline: "head\n", head: "worktree\n" });
+    assert.deepEqual(stagedBoth?.provenance, [{ kind: "workingTree", area: "index" }]);
+    assert.deepEqual(unstagedBoth?.provenance, [{ kind: "workingTree", area: "worktree" }]);
+    assert.deepEqual(completeBoth?.provenance, [
+      { kind: "workingTree", area: "index" },
+      { kind: "workingTree", area: "worktree" }
+    ]);
+    assert.notEqual(staged.fingerprint, unstaged.fingerprint);
+    assert.notEqual(unstaged.fingerprint, complete.fingerprint);
   } finally {
     rmSync(repo, { recursive: true, force: true });
   }
@@ -280,7 +327,9 @@ test("snapshot and session sources use checked documents without synthetic Git h
 });
 
 test("source parser, fuzzy selector, smart default, and project guidelines are deterministic", () => {
-  assert.deepEqual(sourcePresetOrder, ["session", "workingTree", "baseBranch", "commitRange", "pullRequest", "snapshot"]);
+  assert.deepEqual(sourcePresetOrder, ["session", "workingTree", "staged", "unstaged", "baseBranch", "commitRange", "pullRequest", "snapshot"]);
+  assert.deepEqual(unwrap(parseInspectArgs("staged")), { source: { kind: "staged" }, historyMode: "squashed" });
+  assert.deepEqual(unwrap(parseInspectArgs("unstaged")), { source: { kind: "unstaged" }, historyMode: "squashed" });
   assert.deepEqual(unwrap(parseInspectArgs("range main..HEAD --history per-commit")), {
     source: { kind: "commitRange", baseExclusive: "main", headInclusive: "HEAD" },
     historyMode: "perCommit"
@@ -313,6 +362,50 @@ test("source parser, fuzzy selector, smart default, and project guidelines are d
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("source options make the remembered opposite-family request the direct toggle target", () => {
+  const repo = makeRepo("source-options");
+  try {
+    write(repo, "a.txt", "base\n");
+    commitAll(repo, "base");
+    git(repo, "branch", "feature");
+    const store = unwrap(PatchStore.open(join(repo, "patches.db"), { create: true }));
+    const sessionId = unwrap(checkedSessionId("source-options-session"));
+    unwrap(store.upsertSession(sessionId, repo, null, 1));
+    const session = unwrap(store.listSessions())[0];
+    const active = { source: { kind: "session" as const, sessionId }, historyMode: "squashed" as const };
+    const remembered = {
+      source: { kind: "branch" as const, baseRef: "feature", headRef: "HEAD" },
+      historyMode: "perCommit" as const
+    };
+    const options = unwrap(buildSourceSelectorOptions({
+      cwd: repo,
+      store,
+      connectedSession: session,
+      runner: systemCommandRunner,
+      remembered: [active, remembered]
+    }));
+    const selected = selectedSourceOption(options, active, active, remembered);
+    const option = options[selected];
+    assert.equal(option.choice.kind, "request");
+    if (option.choice.kind === "request") {
+      assert.deepEqual(option.choice.request, remembered);
+      assert.equal(option.choice.selectHistory, false);
+    }
+    unwrap(store.close());
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+function textSides(document: ReviewDocument | undefined): { baseline: string | null; head: string | null } {
+  assert.equal(document?.kind, "text");
+  if (document?.kind !== "text") return { baseline: null, head: null };
+  return {
+    baseline: document.baseline.kind === "present" ? document.baseline.content : null,
+    head: document.head.content
+  };
+}
 
 function makeRepo(label: string): string {
   const repo = mkdtempSync(join(tmpdir(), `pi-patches-${label}-`));

@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { TUI, type Terminal } from "@earendil-works/pi-tui";
+import { initTheme } from "@earendil-works/pi-coding-agent";
 import { checkedSessionId, dbPathForCwd, discover, err, ok, PatchStore } from "@pi-patches/store";
 import { loadAppState } from "../src/app.ts";
 import { createReviewComponent, dataVersionAfterRefresh, keyFromInput } from "../src/runner.ts";
@@ -124,6 +126,7 @@ test("key parser maps known controls and drops unknown raw sequences", () => {
   assert.equal(keyFromInput("\x05"), "ctrl+e");
   assert.equal(keyFromInput("j"), "j");
   assert.equal(keyFromInput("f"), "f");
+  assert.equal(keyFromInput("s"), "s");
   assert.equal(keyFromInput("w"), "w");
   assert.equal(keyFromInput("\x1b[999~"), null);
 });
@@ -194,6 +197,129 @@ test("embedded review component renders and closes without owning the parent TUI
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("embedded source selector traverses session, staged, unstaged, and branch sources without closing", async () => {
+  initTheme("dark");
+  const dir = mkdtempSync(join(tmpdir(), "pi-patches-source-switch-"));
+  const dbPath = dbPathForCwd(dir);
+  const session = checkedSessionId("source-switch-session");
+  assert.equal(session.ok, true);
+  if (!session.ok) return;
+  gitCommand(dir, "init", "-b", "main");
+  gitCommand(dir, "config", "user.email", "pi-patches@example.test");
+  gitCommand(dir, "config", "user.name", "Pi Patches Test");
+  writeFileSync(join(dir, "review.txt"), "head\n");
+  gitCommand(dir, "add", "review.txt");
+  gitCommand(dir, "commit", "-m", "base");
+  gitCommand(dir, "branch", "base");
+  writeFileSync(join(dir, "committed.txt"), "committed on main\n");
+  gitCommand(dir, "add", "committed.txt");
+  gitCommand(dir, "commit", "-m", "main change");
+  writeFileSync(join(dir, "review.txt"), "index\n");
+  gitCommand(dir, "add", "review.txt");
+  writeFileSync(join(dir, "review.txt"), "worktree\n");
+
+  const setupStore = PatchStore.open(dbPath, { create: true });
+  assert.equal(setupStore.ok, true);
+  if (!setupStore.ok) return;
+  assert.equal(setupStore.value.upsertSession(session.value, dir, null).ok, true);
+  setupStore.value.close();
+
+  const opened = discover({ db: dbPath, session: session.value, list: false, help: false });
+  assert.equal(opened.ok, true);
+  if (!opened.ok || !opened.value.session) return;
+  const initial = loadAppState(opened.value.store, opened.value.session);
+  assert.equal(initial.ok, true);
+  if (!initial.ok) return;
+  const terminal = new FakeTerminal(160, 30);
+  const tui = new TUI(terminal);
+  let closes = 0;
+  const component = createReviewComponent(tui, opened.value, initial.value, () => closes++, {
+    mouseTracking: false,
+    sourceCwd: dir
+  });
+  try {
+    component.handleInput?.("s");
+    let frame = await waitForFrame(component, /Filter:/);
+    assert.match(frame, /> Git: complete working tree/);
+
+    component.handleInput?.("staged");
+    frame = component.render(160).join("\n");
+    assert.match(frame, /Filter: staged/);
+    assert.match(frame, /> Git: staged only/);
+    component.handleInput?.("\r");
+    frame = await waitForFrame(component, /Switched to staged HEAD\.\.INDEX/);
+    assert.match(frame, /review\.txt/);
+    assert.equal(closes, 0);
+
+    component.handleInput?.("s");
+    frame = await waitForFrame(component, /> Session patches: source-switch-session/);
+    component.handleInput?.("\r");
+    frame = await waitForFrame(component, /Switched to session source-switch-session/);
+    assert.equal(closes, 0);
+
+    component.handleInput?.("s");
+    frame = await waitForFrame(component, /> Git: staged only/);
+    component.handleInput?.("\r");
+    await waitForFrame(component, /Switched to staged HEAD\.\.INDEX/);
+    assert.equal(closes, 0);
+
+    writeFileSync(join(dir, "review.txt"), "index two\n");
+    gitCommand(dir, "add", "review.txt");
+    writeFileSync(join(dir, "review.txt"), "worktree two\n");
+    component.handleInput?.("r");
+    frame = await waitForFrame(component, /Refreshed staged HEAD\.\.INDEX/);
+    assert.match(frame, /index two/);
+
+    component.handleInput?.("s");
+    await waitForFrame(component, /Filter:/);
+    component.handleInput?.("unstaged");
+    frame = component.render(160).join("\n");
+    assert.match(frame, /> Git: unstaged only/);
+    component.handleInput?.("\r");
+    frame = await waitForFrame(component, /Switched to unstaged INDEX\.\.WORKTREE/);
+    assert.match(frame, /worktree two/);
+    assert.equal(closes, 0);
+
+    component.handleInput?.("s");
+    await waitForFrame(component, /Filter:/);
+    component.handleInput?.("branch: base");
+    frame = component.render(160).join("\n");
+    assert.match(frame, /> Git branch: base\.\.HEAD/);
+    component.handleInput?.("\r");
+    await waitForFrame(component, /History mode/);
+    component.handleInput?.("\r");
+    await waitForFrame(component, /Switched to branch base\.\.HEAD/);
+    assert.equal(closes, 0);
+
+    component.handleInput?.("s");
+    frame = await waitForFrame(component, /> Session patches: source-switch-session/);
+    component.handleInput?.("\r");
+    await waitForFrame(component, /Switched to session source-switch-session/);
+    assert.equal(closes, 0);
+  } finally {
+    component.dispose();
+    opened.value.store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+async function waitForFrame(component: { render(width: number): string[] }, pattern: RegExp): Promise<string> {
+  let frame = "";
+  for (let attempt = 0; attempt < 100; attempt++) {
+    frame = component.render(160).join("\n");
+    if (pattern.test(frame)) return frame;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.match(frame, pattern);
+  return frame;
+}
+
+function gitCommand(cwd: string, ...args: string[]): string {
+  const result = spawnSync("git", args, { cwd, encoding: "utf8" });
+  if (result.status !== 0) throw new Error(`git ${args.join(" ")}: ${result.stderr}`);
+  return result.stdout;
+}
 
 class FakeTerminal implements Terminal {
   readonly kittyProtocolActive = false;

@@ -27,13 +27,22 @@ import {
   type AnalysisRequest,
   type ModelRunner
 } from "./analysis/index.ts";
-import { loadDbSnapshot, loadSourceAnnotations, readCurrentFile } from "./app.ts";
+import { loadDatasetAppState, loadDbSnapshot, loadSourceAnnotations, readCurrentFile } from "./app.ts";
 import { renderFrame } from "./components/frame.ts";
 import { computeFrameLayout } from "./layout.ts";
 import { parseSgrMouseEvents } from "./mouse.ts";
 import { truncateVisible, visibleWidth } from "./render/ansi.ts";
 import { enableMouseTracking, enterAltScreen, type TerminalCleanup } from "./term.ts";
 import { fileFreshnessMap, update, type AppEvent, type AppKey, type AppState, type Effect, type Mode } from "./state.ts";
+import {
+  buildSourceSelectorOptions,
+  materializeInspectRequest,
+  resolveInspectSession,
+  selectedSourceOption,
+  systemCommandRunner,
+  type CommandRunner,
+  type InspectRequest
+} from "./sources/index.ts";
 
 export function runInteractive(discovery: Discovery, initialState: AppState): void {
   const terminal = new ProcessTerminal();
@@ -90,6 +99,8 @@ export type ReviewComponentOptions = {
   reservedRows?: number;
   analysis?: PendingAnalysis;
   mouseTracking?: boolean;
+  sourceCwd?: string;
+  sourceCommandRunner?: CommandRunner;
 };
 
 export function createReviewComponent(
@@ -114,6 +125,10 @@ export function createReviewComponent(
   let analysisController: AbortController | null = null;
   let analysisProgressTimer: NodeJS.Timeout | null = null;
   let pendingAnalysisProgress: AnalysisProgress | null = null;
+  let sourceTaskTimer: NodeJS.Timeout | null = null;
+  const connectedSession = discovery.session ?? initialState.session;
+  const sourceCwd = options.sourceCwd ?? connectedSession.cwd;
+  const sourceCommandRunner = options.sourceCommandRunner ?? systemCommandRunner;
   const disableComponentMouse = options.mouseTracking === false
     ? null
     : enableMouseTracking((chunk) => tui.terminal.write(chunk));
@@ -127,6 +142,16 @@ export function createReviewComponent(
       return renderFrame(state, width, rows);
     },
     handleInput(data: string): void {
+      if (state.mode.kind === "sourceSelector" || state.mode.kind === "sourceInput") {
+        const key = keyFromInput(data);
+        if (key === "Escape" || key === "Backspace" || key === "Enter" || key === "ArrowUp" || key === "ArrowDown" || key === "ctrl+d" || key === "ctrl+u") {
+          dispatch({ kind: "key", key });
+          return;
+        }
+        const printable = decodeKittyPrintable(data) ?? data;
+        if ([...printable].every((character) => character >= " ")) dispatch({ kind: "sourceTextInput", text: printable });
+        return;
+      }
       const key = keyFromInput(data);
       if (key) dispatch({ kind: "key", key });
     },
@@ -180,6 +205,12 @@ export function createReviewComponent(
         return;
       case "refresh":
         refresh();
+        return;
+      case "openSourceSelector":
+        scheduleSourceTask(() => openSourceSelector(effect.token));
+        return;
+      case "switchSource":
+        scheduleSourceTask(() => switchSource(effect.token, effect.request));
         return;
       case "queueDrafts": {
         const queued = state.dataset.source.kind === "session"
@@ -294,6 +325,63 @@ export function createReviewComponent(
     }
   }
 
+  function scheduleSourceTask(task: () => void): void {
+    if (sourceTaskTimer !== null) clearTimeout(sourceTaskTimer);
+    tui.requestRender();
+    sourceTaskTimer = setTimeout(() => {
+      sourceTaskTimer = null;
+      if (!disposed) task();
+    }, 0);
+  }
+
+  function openSourceSelector(token: number): void {
+    const navigation = state.sourceNavigation;
+    const optionsResult = buildSourceSelectorOptions({
+      cwd: sourceCwd,
+      store: discovery.store,
+      connectedSession,
+      runner: sourceCommandRunner,
+      remembered: [navigation.lastSession, navigation.lastGit].filter((request): request is InspectRequest => request !== null)
+    });
+    if (!optionsResult.ok) {
+      dispatch({ kind: "sourceSwitchFailed", token, message: errorMessage(optionsResult.error) });
+      return;
+    }
+    const selected = selectedSourceOption(
+      optionsResult.value,
+      navigation.active,
+      navigation.lastSession,
+      navigation.lastGit
+    );
+    dispatch({ kind: "sourceSelectorOpened", token, options: optionsResult.value, selected });
+  }
+
+  function switchSource(token: number, request: InspectRequest): void {
+    const context = {
+      cwd: sourceCwd,
+      store: discovery.store,
+      currentSession: connectedSession,
+      runner: sourceCommandRunner
+    };
+    const dataset = materializeInspectRequest(request, context);
+    if (!dataset.ok) {
+      dispatch({ kind: "sourceSwitchFailed", token, message: errorMessage(dataset.error) });
+      return;
+    }
+    const targetSession = resolveInspectSession(request, context);
+    if (!targetSession.ok) {
+      dispatch({ kind: "sourceSwitchFailed", token, message: errorMessage(targetSession.error) });
+      return;
+    }
+    const next = loadDatasetAppState(discovery.store, targetSession.value, dataset.value, request);
+    if (!next.ok) {
+      dispatch({ kind: "sourceSwitchFailed", token, message: errorMessage(next.error) });
+      return;
+    }
+    dispatch({ kind: "sourceSwitchSucceeded", token, request, next: next.value });
+    installFileWatchers();
+  }
+
   function refresh(): boolean {
     let refreshed = true;
     if (state.dataset.source.kind === "session" && state.dataset.source.sessionId === state.session.id) {
@@ -354,6 +442,12 @@ export function createReviewComponent(
     if (diskRefreshTimer) clearTimeout(diskRefreshTimer);
     diskRefreshTimer = setTimeout(() => {
       diskRefreshTimer = null;
+      if (state.dataset.source.kind !== "session") {
+        diskRefreshAll = false;
+        pendingDiskRefreshPaths.clear();
+        dispatch({ kind: "key", key: "r" });
+        return;
+      }
       if (diskRefreshAll) {
         diskRefreshAll = false;
         pendingDiskRefreshPaths.clear();
@@ -375,7 +469,10 @@ export function createReviewComponent(
   }
 
   function installFileWatchers(): void {
-    const watchesDisk = state.dataset.source.kind === "session" || state.dataset.source.kind === "workingTree" || state.dataset.source.kind === "snapshot";
+    const watchesDisk = state.dataset.source.kind === "session" ||
+      state.dataset.source.kind === "workingTree" ||
+      state.dataset.source.kind === "unstaged" ||
+      state.dataset.source.kind === "snapshot";
     const dirs = new Set(watchesDisk ? state.files.map((file) => dirname(file.row.path)) : []);
     for (const [dir, watcher] of fileWatchers) {
       if (dirs.has(dir)) continue;
@@ -441,6 +538,8 @@ export function createReviewComponent(
     disposed = true;
     analysisController?.abort();
     analysisController = null;
+    if (sourceTaskTimer !== null) clearTimeout(sourceTaskTimer);
+    sourceTaskTimer = null;
     if (analysisProgressTimer) clearTimeout(analysisProgressTimer);
     analysisProgressTimer = null;
     pendingAnalysisProgress = null;
@@ -739,7 +838,7 @@ export function dataVersionAfterRefresh(previous: number, observed: Result<numbe
 }
 
 function knownSingleKey(data: string): data is AppKey {
-  return data.length === 1 && "qrhlHdtnpfgG{}?aScevjkw[]ynuxI1234".includes(data);
+  return data.length === 1 && "qrhlHdtnpfgG{}?aScevjkws[]ynuxI1234".includes(data);
 }
 
 function assertNever(value: never): never {
