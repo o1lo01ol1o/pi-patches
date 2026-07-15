@@ -8,9 +8,6 @@ let
 in
 
 {
-  # https://devenv.sh/reference/options/
-  devenv.root = "/path/to/pi-patches";
-
   languages.javascript = {
     enable = true;
     package = nodejs;

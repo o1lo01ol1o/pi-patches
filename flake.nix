@@ -4,7 +4,7 @@
     systems.url = "github:nix-systems/default";
     devenv.url = "github:cachix/devenv";
     devenv.inputs.nixpkgs.follows = "nixpkgs";
-    pi.url = "path:/path/to/pi";
+    pi.url = "github:o1lo01ol1o/pi/e53c0e57da14fc4fdd873382bba50952be0b3f34";
     pi.inputs.nixpkgs.follows = "nixpkgs";
     pi.inputs.systems.follows = "systems";
     pi.inputs.devenv.follows = "devenv";

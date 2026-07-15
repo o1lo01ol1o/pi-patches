@@ -75,7 +75,7 @@ by `/patches connect`.
 
 ## 3. Repository layout & tooling
 
-npm-workspaces monorepo in `/path/to/pi-patches`:
+npm-workspaces monorepo at the repository root:
 
 ```
 pi-patches/
@@ -552,7 +552,7 @@ are batch-level metadata, not repeated on every item (§10.2-§10.3).
 
 ## 8. Verification plan (per implementation phase)
 
-**Phase 0 — scaffold.** `nix develop` → `node -v` = v24.x; `npm install`; `npm run typecheck` green.
+**Phase 0 — scaffold.** `nix develop --no-pure-eval` → `node -v` = v24.x; `npm install`; `npm run typecheck` green.
 
 **Phase 1 — store + recorder.** Unit tests (`node --test`, tmp DBs): row⇄domain round-trip property (`parseRow(writeRow(v)) ≡ Ok(v)` over generated domain values), golden `fixtures/v1.db` parse, rejection tests (rows violating each CHECK constraint fail at the SQL layer; corrupt rows parse to structured `CorruptRow` errors), illegal status transitions unwritable through the API, baseline capture, seq monotonicity across reopen (UNIQUE constraint), `forkSession` copies, `claimQueued` atomicity from two connections, `data_version` cross-connection signaling. Integration, in a scratch project:
 ```

@@ -17,8 +17,7 @@ the same database from another terminal.
 - Git for working-tree, branch, commit, and range sources
 - `gh` for pull-request sources
 
-This checkout currently imports the sibling pi checkout at
-`/path/to/pi` through `flake.nix` and reuses its Node and runtime
+The Nix flake pins a compatible pi revision and reuses its Node and runtime
 package set.
 
 ## Install In Pi
@@ -26,8 +25,9 @@ package set.
 Install the repository root as a local pi package:
 
 ```sh
-cd /path/to/pi-patches
-nix develop -c pi install /path/to/pi-patches
+git clone https://github.com/o1lo01ol1o/pi-patches.git
+cd pi-patches
+nix develop --no-pure-eval -c pi install "$PWD"
 ```
 
 Restart pi after installing or changing this checkout. Pi records the absolute
@@ -37,17 +37,19 @@ prefer a full restart because `/reload` may retain transitive workspace modules.
 Install it only for the current project with:
 
 ```sh
-nix develop -c pi install -l /path/to/pi-patches
+nix develop --no-pure-eval -c pi install -l "$PWD"
 ```
 
 Run it once without installing with:
 
 ```sh
-nix develop -c pi -e /path/to/pi-patches/packages/extension/src/index.ts
+nix develop --no-pure-eval -c pi -e "$PWD/packages/extension/src/index.ts"
 ```
 
-The checkout must retain its workspace dependencies. `nix develop` installs
-them. The non-Nix equivalent is `npm install --ignore-scripts` with Node 24.
+The checkout must retain its workspace dependencies. `nix develop
+--no-pure-eval` installs them while allowing devenv to discover the portable
+checkout root. The non-Nix equivalent is `npm install --ignore-scripts` with
+Node 24.
 
 ## Recorder
 
@@ -379,14 +381,14 @@ pi-review [--db PATH] [--session ID_OR_PREFIX] [--list] [--help]
 List sessions in a database:
 
 ```sh
-nix develop -c pi-review --list
-nix develop -c pi-review --db /path/to/.pi/patches/patches.db --list
+nix develop --no-pure-eval -c pi-review --list
+nix develop --no-pure-eval -c pi-review --db /path/to/.pi/patches/patches.db --list
 ```
 
 Open a specific session:
 
 ```sh
-nix develop -c pi-review \
+nix develop --no-pure-eval -c pi-review \
   --db /path/to/.pi/patches/patches.db \
   --session <session-id-or-unique-prefix>
 ```
@@ -425,13 +427,13 @@ available but are stale; they are not rewritten to look current.
 Enter the development shell:
 
 ```sh
-nix develop
+nix develop --no-pure-eval
 ```
 
 Run typechecking and all workspace tests:
 
 ```sh
-nix develop -c pi-patches-check
+nix develop --no-pure-eval -c pi-patches-check
 ```
 
 The script runs:
@@ -445,7 +447,7 @@ Equivalent and packaging gates are:
 
 ```sh
 devenv test
-nix flake check
+nix flake check --no-pure-eval
 ```
 
 The repository is a TypeScript npm workspace with no compilation step at runtime.

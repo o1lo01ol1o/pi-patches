@@ -272,14 +272,18 @@
         ]
       },
       "locked": {
-        "lastModified": 1783549392,
-        "narHash": "sha256-BkrhN5ZIf1gyvQD2gN5EAtTLoejeoCGuNqSUEnvp4NQ=",
-        "path": "/path/to/pi",
-        "type": "path"
+        "lastModified": 1783855828,
+        "narHash": "sha256-dnIFm3GRPZ4YgZUKLhbAnC+Sodlb7iOslbhVs2yLB9o=",
+        "owner": "o1lo01ol1o",
+        "repo": "pi",
+        "rev": "e53c0e57da14fc4fdd873382bba50952be0b3f34",
+        "type": "github"
       },
       "original": {
-        "path": "/path/to/pi",
-        "type": "path"
+        "owner": "o1lo01ol1o",
+        "repo": "pi",
+        "rev": "e53c0e57da14fc4fdd873382bba50952be0b3f34",
+        "type": "github"
       }
     },
     "root": {
