@@ -4,3 +4,4 @@ devenv.lock
 node_modules/
 .tsbuildinfo/
 tmp/
+.pi/
